@@ -23,6 +23,7 @@ from nf_robot.common.util import *
 import nf_robot.common.definitions as model_constants
 from nf_robot.generated.nf import telemetry, common
 from nf_robot.host.video_streamer import NfVideoStreamer
+from nf_robot.observability import OBS
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,14 @@ class ComponentClient:
         self.local_video_uri = None
         self.feed_number = None
         self.remote_stream_path = None
+        self._connection_generation = 0
+        self._video_thread = None
+        self._video_encoder_thread = None
+        self._video_container = None
+        self._video_stop_event = None
+        self._video_retry_task = None
+        self._video_lock = threading.Lock()
+        self._last_frame_host_time = None
 
         # things used by jpeg/resizing thread
         self.frame_lock = threading.Lock()
@@ -84,15 +93,125 @@ class ComponentClient:
         self.conn_status = None # subclass needs to set this in init
         self.last_known_centers = {}
 
+    def _is_current_video_session(self, generation, stop_event):
+        return (
+            self.connected
+            and generation == self._connection_generation
+            and not stop_event.is_set()
+        )
+
+    def _recent_video_age(self):
+        if self._last_frame_host_time is None:
+            return None
+        return time.time() - self._last_frame_host_time
+
+    def _stop_video_session(self, join_timeout=2.0):
+        with self._video_lock:
+            stop_event = self._video_stop_event
+            thread = self._video_thread
+            encoder_thread = self._video_encoder_thread
+            container = self._video_container
+            if stop_event is not None:
+                stop_event.set()
+            with self.new_frame_condition:
+                self.new_frame_condition.notify_all()
+
+        if container is not None:
+            try:
+                container.close()
+            except Exception:
+                logger.exception("Failed to close video container while stopping video session")
+
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=join_timeout)
+        if encoder_thread is not None and encoder_thread is not threading.current_thread() and encoder_thread.is_alive():
+            encoder_thread.join(timeout=join_timeout)
+
+        thread_alive = thread is not None and thread.is_alive()
+        encoder_alive = encoder_thread is not None and encoder_thread.is_alive()
+        if thread_alive or encoder_alive:
+            logger.warning(
+                "Video session for %s did not stop cleanly; receiver_alive=%s encoder_alive=%s",
+                self.address,
+                thread_alive,
+                encoder_alive,
+            )
+            return False
+
+        with self._video_lock:
+            if self._video_thread is thread:
+                self._video_thread = None
+                self._video_encoder_thread = None
+                self._video_container = None
+                self._video_stop_event = None
+                self._last_frame_host_time = None
+                self.last_frame_cap_time = None
+                self.frame = None
+                self.last_frame_resized = None
+        return True
+
+    def _start_video_session(self, port, generation):
+        if not self._stop_video_session():
+            logger.warning(
+                "Skipping replacement video session for %s because the previous session is still stopping",
+                self.address,
+            )
+            return False
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=self.receive_video,
+            kwargs={"port": port, "generation": generation, "stop_event": stop_event},
+            daemon=True,
+        )
+        with self._video_lock:
+            self.last_frame_cap_time = None
+            self._last_frame_host_time = None
+            self.frame = None
+            self.last_frame_resized = None
+            self._video_stop_event = stop_event
+            self._video_thread = thread
+        thread.start()
+        return True
+
+    async def _retry_video_session_start(self, port, generation, attempts=5, retry_delay=1.0):
+        for attempt in range(attempts):
+            await asyncio.sleep(retry_delay)
+            if not self.connected or generation != self._connection_generation:
+                return False
+            if self._start_video_session(port, generation):
+                logger.info(
+                    "Started replacement video session for %s on retry %d",
+                    self.address,
+                    attempt + 1,
+                )
+                return True
+        logger.warning(
+            "Replacement video session for %s did not start after %d retries",
+            self.address,
+            attempts,
+        )
+        return False
+
+    def _schedule_video_session_start(self, port, generation):
+        if self._start_video_session(port, generation):
+            return
+        if self._video_retry_task is not None and not self._video_retry_task.done():
+            self._video_retry_task.cancel()
+        self._video_retry_task = asyncio.create_task(
+            self._retry_video_session_start(port, generation)
+        )
+
     def send_conn_status(self):
         self.ob.send_ui(component_conn_status=copy.deepcopy(self.conn_status))
 
-    def receive_video(self, port):
+    def receive_video(self, port, generation, stop_event):
         video_uri = f'tcp://{self.address}:{port}'
         # print(f'Connecting to {video_uri}')
         self.conn_status.video_status = telemetry.ConnStatus.CONNECTING
         # cannot send here, not in event loop
         self.notify_video = True
+        container = None
+        encoder_thread = None
 
         options = {
             'rtsp_transport': 'tcp',
@@ -112,16 +231,31 @@ class ComponentClient:
             #     if attempt==0:
             #         raise
             #     time.sleep(1.5)
+            with self._video_lock:
+                if not self._is_current_video_session(generation, stop_event):
+                    container.close()
+                    return
+                self._video_container = container
 
             stream = next(s for s in container.streams if s.type == 'video')
             stream.thread_type = "SLICE"
 
             # start thread for frame risize and forwarding
-            encoder_thread = None
             components_to_stream = [None, *self.config.preferred_cameras]
             if self.anchor_num in components_to_stream:
-                encoder_thread = threading.Thread(target=self.frame_resizer_loop, kwargs={"feed_number": components_to_stream.index(self.anchor_num)}, daemon=True)
+                encoder_thread = threading.Thread(
+                    target=self.frame_resizer_loop,
+                    kwargs={
+                        "feed_number": components_to_stream.index(self.anchor_num),
+                        "generation": generation,
+                        "stop_event": stop_event,
+                    },
+                    daemon=True,
+                )
                 encoder_thread.start()
+                with self._video_lock:
+                    if self._video_thread is threading.current_thread():
+                        self._video_encoder_thread = encoder_thread
 
             self.conn_status.video_status = telemetry.ConnStatus.CONNECTED
             self.notify_video = True
@@ -134,7 +268,7 @@ class ComponentClient:
                 logger.error(f"Error in pool worker: {error}")
 
             for av_frame in container.decode(stream):
-                if not self.connected:
+                if not self._is_current_video_session(generation, stop_event):
                     break
                 # determine the wall time when the frame was captured
                 timestamp = self.stream_start_ts + av_frame.time
@@ -142,11 +276,12 @@ class ComponentClient:
 
                 fr = av_frame.to_ndarray(format='rgb24')
                 with self.new_frame_condition:
+                    self._last_frame_host_time = time.time()
                     self.frame = fr
                     self.new_frame_condition.notify()
 
                 # save information about stream latency and framerate
-                now = time.time()
+                now = self._last_frame_host_time
                 self.stat.latency.append(now - timestamp)
                 fr = 1/(now - last_time)
                 self.stat.framerate.append(fr)
@@ -204,20 +339,29 @@ class ComponentClient:
                 # handle_detections runs in this process, but in a thread managed by the pool.
                 time.sleep(0.005)
 
-            if encoder_thread is not None:
-                encoder_thread.join()
-
         except (av.error.TimeoutError, av.error.ConnectionRefusedError):
             logger.warning('No video stream available')
-            self.conn_status.video_status = telemetry.ConnStatus.NOT_DETECTED
-            self.notify_video = True
+            if generation == self._connection_generation:
+                self.conn_status.video_status = telemetry.ConnStatus.NOT_DETECTED
+                self.notify_video = True
             return
 
         finally:
-            if 'container' in locals():
+            if container is not None:
                 container.close()
+            stop_event.set()
+            with self.new_frame_condition:
+                self.new_frame_condition.notify_all()
+            if encoder_thread is not None and encoder_thread is not threading.current_thread():
+                encoder_thread.join(timeout=2.0)
+            with self._video_lock:
+                if self._video_thread is threading.current_thread():
+                    self._video_thread = None
+                    self._video_encoder_thread = None
+                    self._video_container = None
+                    self._video_stop_event = None
 
-    def frame_resizer_loop(self, feed_number):
+    def frame_resizer_loop(self, feed_number, generation, stop_event):
         """
         This runs in a dedicated thread. It waits for a signal that a new
         frame is available, resizes it, and stabilizes it in the gripper case.
@@ -246,6 +390,8 @@ class ComponentClient:
         mjpegport = 4246 if self.anchor_num is None else 4247 + self.anchor_num
 
         def on_ready(local_uri, stream_path):
+            if generation != self._connection_generation or stop_event.is_set():
+                return
             self.local_video_uri = local_uri
             self.feed_number = feed_number
             self.remote_stream_path = stream_path
@@ -268,33 +414,35 @@ class ComponentClient:
         logger.info(f'Streaming video locally at {vs.local_uri} with res {final_shape}')
         self.streaming_active = True
 
-        while self.connected:
-            with self.new_frame_condition:
-                # Wait until the main receive_video loop signals us.
-                # The 'wait' call will timeout after 1 second to re-check
-                # the self.connected flag, allowing the thread to exit gracefully.
-                signaled = self.new_frame_condition.wait(timeout=1.0)
-                if not signaled:
+        try:
+            while self._is_current_video_session(generation, stop_event):
+                with self.new_frame_condition:
+                    # Wait until the main receive_video loop signals us.
+                    # The wait timeout lets the thread re-check the stop event.
+                    signaled = self.new_frame_condition.wait(timeout=1.0)
+                    if not signaled:
+                        continue
+                    # We were woken up, so copy the frame pointer while we have the lock
+                    frame_to_encode = self.frame
+
+                if frame_to_encode is None:
+                    logger.debug(f'No frame to encode {self}')
                     continue
-                # We were woken up, so copy the frame pointer while we have the lock
-                frame_to_encode = self.frame
 
-            if frame_to_encode is None:
-                logger.debug(f'No frame to encode {self}')
-                continue
-
-            # Do the actual work outside the lock
-            # This lets the receive_video loop add the next frame without waiting for the encode.
-            self.last_frame_resized = self.process_frame(frame_to_encode)
-            ortho_event = getattr(self.ob, 'ortho_event', None)
-            if ortho_event is not None:
-                ortho_event.set()
-            rgb = cv2.cvtColor(self.last_frame_resized, cv2.COLOR_BGR2RGB)
-            vs.send_frame(rgb)
-
-        self.remote_stream_path = None
-        self.local_video_uri = None
-        vs.stop()
+                # Do the actual work outside the lock
+                # This lets the receive_video loop add the next frame without waiting for the encode.
+                self.last_frame_resized = self.process_frame(frame_to_encode)
+                ortho_event = getattr(self.ob, 'ortho_event', None)
+                if ortho_event is not None:
+                    ortho_event.set()
+                rgb = cv2.cvtColor(self.last_frame_resized, cv2.COLOR_BGR2RGB)
+                vs.send_frame(rgb)
+        finally:
+            if generation == self._connection_generation:
+                self.remote_stream_path = None
+                self.local_video_uri = None
+                self.streaming_active = False
+            vs.stop()
 
     def process_frame(self, frame_to_encode):
         """
@@ -315,21 +463,27 @@ class ComponentClient:
         self.failed_to_connect = False # indicating we failed to ever make a connection
         ws_uri = f"ws://{self.address}:{self.port}"
         # print(f"Connecting to {ws_uri}...")
+        component_name = self.__class__.__name__
         try:
-            async with websockets.connect(ws_uri, max_size=None, open_timeout=10) as websocket:
-                self.connected = True
-                logger.info(f"Connected to {ws_uri}.")
-                # Set an event that the observer is waiting on.
-                if self.connection_established_event is not None:
-                    self.connection_established_event.set()
-                await self.receive_loop(websocket)
+            with OBS.span("component.websocket.connect", component=component_name, address=self.address, port=self.port):
+                async with websockets.connect(ws_uri, max_size=None, open_timeout=10) as websocket:
+                    self.connected = True
+                    OBS.record_component_ws(component_name, "connected")
+                    logger.info(f"Connected to {ws_uri}.")
+                    # Set an event that the observer is waiting on.
+                    if self.connection_established_event is not None:
+                        self.connection_established_event.set()
+                    await self.receive_loop(websocket)
         except (asyncio.exceptions.CancelledError, websockets.exceptions.ConnectionClosedOK):
+            OBS.record_component_ws(component_name, "closed")
             pass # normal close
         except websockets.exceptions.ConnectionClosedError as e:
+            OBS.record_component_ws(component_name, "abnormal_close")
             logger.warning(f"Component server anum={self.anchor_num} disconnected abnormally: {e}")
             self.abnormal_shutdown = True
         except (OSError, InvalidURI, TimeoutError, InvalidHandshake) as e:
             # normal answer when waiting for component to come online
+            OBS.record_component_ws(component_name, "failed")
             self.failed_to_connect = True
         finally:
             self.connected = False
@@ -359,11 +513,13 @@ class ComponentClient:
         # save a reference to this for send_commands
         self.websocket = websocket
         self.notify_video = False
+        self._connection_generation += 1
+        connection_generation = self._connection_generation
+        self._stop_video_session()
         # send configuration to robot component to override default.
         r = await self.send_config()
         # start task to watch heartbeat event
         self.safety_task = asyncio.create_task(self.safety_monitor())
-        vid_thread = None
         # Loop until disconnected
         while self.connected:
             try:
@@ -374,8 +530,7 @@ class ComponentClient:
                     port = int(update['video_ready'][0])
                     self.stream_start_ts = float(update['video_ready'][1])
                     logger.debug(f'stream_start_ts={self.stream_start_ts} ({time.time()-self.stream_start_ts:.2f}s ago)')
-                    vid_thread = threading.Thread(target=self.receive_video, kwargs={"port": port}, daemon=True)
-                    vid_thread.start()
+                    self._schedule_video_session_start(port, connection_generation)
                 if 'firmware_update_complete' in update:
                     upd = update['firmware_update_complete']
                     if type(upd) == dict:
@@ -408,21 +563,28 @@ class ComponentClient:
                 logger.warning(f"Connection to {self.address} closed. {e}")
                 self.connected = False
                 self.websocket = None
+                if self._video_retry_task is not None and not self._video_retry_task.done():
+                    self._video_retry_task.cancel()
+                self._stop_video_session()
                 # self.conn_status.websocket_status = telemetry.ConnStatus.NOT_DETECTED
                 # self.conn_status.video_status = telemetry.ConnStatus.NOT_DETECTED
                 # self.send_conn_status()
                 raise e # TODO figure out if this causes the abnormal shutdown return value in connect_websocket like it should
                 break
-        if vid_thread is not None:
-            # vid_thread should stop because self.connected is False
-            vid_thread.join()
+        self._stop_video_session()
 
     async def send_commands(self, update):
-        if self.connected:
+        if self.connected and self.websocket is not None:
             x = json.dumps(update)
-            # by trying to get the result out of the future, you force any exception in the task to be raised
-            # since this could be a websockets.exceptions.ConnectionClosedError it's important not to let it disappar
-            result = await self.websocket.send(x)
+            try:
+                # by trying to get the result out of the future, you force any exception in the task to be raised
+                # since this could be a websockets.exceptions.ConnectionClosedError it's important not to let it disappar
+                with OBS.span("component.websocket.send_command", component=self.__class__.__name__, bytes=len(x)):
+                    result = await self.websocket.send(x)
+            except (ConnectionClosedOK, ConnectionClosedError, OSError, TimeoutError) as e:
+                logger.warning(f"Unable to send command to {self.address}; connection is closing. {e}")
+                self.connected = False
+                self.websocket = None
 
     async def slow_stop_spool(self):
         # spool will decelerate at the rate allowed by the config file.
@@ -458,7 +620,7 @@ class ComponentClient:
 
     async def safety_monitor(self):
         """Notifies observer if this anchor stops sending line record updates for some time"""
-        TIMEOUT=4 # seconds
+        TIMEOUT=12 # seconds; must exceed observed host event-loop stalls during video reconnects.
         last_update = time.time()
         while self.connected:
             try:
@@ -469,14 +631,27 @@ class ComponentClient:
             except TimeoutError:
                 # print(f'No update sent from {self.anchor_num} in {TIMEOUT} seconds. it may have gone offline. sending ping')
                 try:
+                    if self.websocket is None:
+                        raise TimeoutError("websocket is no longer available")
                     pong_future = await self.websocket.ping()
                     latency = await asyncio.wait_for(pong_future, TIMEOUT)
                     # some hiccup on the server raspi made it unable to send anything for some time but it's not down.
                     # print(f'Pong received in {latency}s, must have been my imagination.')
                     continue
                 except (ConnectionClosedError, TimeoutError):
+                    video_age = self._recent_video_age()
+                    if self.anchor_num is None and video_age is not None and video_age < TIMEOUT:
+                        logger.warning(
+                            "Gripper telemetry heartbeat stalled for %.1fs and websocket ping timed out, "
+                            "but video is still fresh at %.2fs old; keeping video session alive.",
+                            time.time() - last_update,
+                            video_age,
+                        )
+                        continue
+
                     # it's no longer running, either because it lost power, or the server crashed.
-                    logger.warning(f"Anchor {self.anchor_num} confirmed down. hasn't been seen in {time.time() - last_update:.1f} seconds.")
+                    component_name = 'gripper' if self.anchor_num is None else f'anchor {self.anchor_num}'
+                    logger.warning(f"{component_name} confirmed down. hasn't been seen in {time.time() - last_update:.1f} seconds.")
                     self.connected = False
                     # immediately trigger the "abnormal shutdown" return from the connect_websocket task
                     # this is how the observer is actually notified. follow the control flow by looking at `if abnormal_close:` in observer.py

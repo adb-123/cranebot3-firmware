@@ -213,6 +213,50 @@ class TestPositionEstimator(unittest.TestCase):
             f"Expected stale-ts jitter to far exceed fresh-ts jitter "
             f"(stale={stale_jitter*100:.1f} cm, fresh={fresh_jitter*100:.1f} cm)")
 
+    def test_point_inside_work_area_rectangular_array(self):
+        self.pe.work_area = np.array([
+            [-1.0, -2.0],
+            [3.0, 4.0],
+        ])
+
+        self.assertTrue(self.pe.point_inside_work_area_2d([0.0, 0.0]))
+        self.assertTrue(self.pe.point_inside_work_area_2d([3.0, 4.0]))
+        self.assertFalse(self.pe.point_inside_work_area_2d([3.1, 0.0]))
+        self.assertFalse(self.pe.point_inside_work_area_2d([0.0, -2.1]))
+
+    def test_point_inside_work_area_polygon_array(self):
+        self.pe.work_area = np.array([
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [1.0, 2.0],
+        ])
+
+        self.assertTrue(self.pe.point_inside_work_area_2d([1.0, 0.5]))
+        self.assertTrue(self.pe.point_inside_work_area_2d([1.0, 2.0]))
+        self.assertFalse(self.pe.point_inside_work_area_2d([1.8, 1.8]))
+
+    def test_point_inside_work_area_no_config_fallback(self):
+        self.pe.work_area = None
+
+        self.assertTrue(self.pe.point_inside_work_area_2d([999.0, -999.0]))
+        self.assertTrue(self.pe.point_inside_work_area([999.0, -999.0, 42.0]))
+
+    def test_point_inside_work_area_projects_3d_points_to_xy(self):
+        self.pe.work_area = np.array([
+            [-1.0, -1.0],
+            [1.0, -1.0],
+            [1.0, 1.0],
+            [-1.0, 1.0],
+        ])
+
+        self.assertTrue(self.pe.point_inside_work_area([0.0, 0.0, 100.0]))
+        self.assertFalse(self.pe.point_inside_work_area([2.0, 0.0, -5.0]))
+
+    def test_point_inside_work_area_invalid_config_fails_closed(self):
+        self.pe.work_area = np.array([[0.0, 0.0]])
+
+        self.assertFalse(self.pe.point_inside_work_area_2d([0.0, 0.0]))
+
 
 class TestPositionEstimatorAsync(unittest.IsolatedAsyncioTestCase):
 

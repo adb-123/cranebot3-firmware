@@ -8,6 +8,7 @@ import socket
 import asyncio
 import argparse
 import logging
+import os
 from zeroconf import IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import (
     AsyncServiceBrowser,
@@ -34,6 +35,46 @@ import json
 import re
 import subprocess
 
+logger = logging.getLogger(__name__)
+
+DEFAULT_CV_THREADS = 1
+DEFAULT_TORCH_THREADS = 4
+DEFAULT_TORCH_INTEROP_THREADS = 1
+MAX_SWING_MODEL_AGE_S = 2.0
+
+
+def _env_int(name, default):
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def configure_native_thread_pools(configure_torch=False):
+    cv_threads = _env_int("NF_ROBOT_CV_THREADS", DEFAULT_CV_THREADS)
+    try:
+        cv2.setNumThreads(cv_threads)
+    except Exception:
+        logger.exception("Failed to configure OpenCV thread count")
+
+    if configure_torch:
+        try:
+            import torch
+            torch.set_num_threads(_env_int("NF_ROBOT_TORCH_THREADS", DEFAULT_TORCH_THREADS))
+            torch.set_num_interop_threads(_env_int("NF_ROBOT_TORCH_INTEROP_THREADS", DEFAULT_TORCH_INTEROP_THREADS))
+        except RuntimeError:
+            # Torch only allows interop threads to be set before parallel work starts.
+            logger.warning("Torch thread pools were already initialized; leaving existing settings")
+        except ImportError:
+            pass
+
+
+def configure_worker_process():
+    configure_native_thread_pools(configure_torch=False)
+
+
+configure_native_thread_pools(configure_torch=False)
+
 from nf_robot.common.pose_functions import compose_poses
 from nf_robot.common.cv_common import *
 from nf_robot.common.config_loader import *
@@ -45,14 +86,14 @@ from nf_robot.host.data_store import DataStore
 from nf_robot.host.stats import StatCounter
 from nf_robot.host.target_queue import TargetQueue
 from nf_robot.host.calibration import optimize_anchor_poses
+from nf_robot.host.calibration_artifacts import CalibrationArtifactSession
 from nf_robot.host.eyelet_calibration import optimize_arp_anchors, analyze_diamond_data, DIAMOND_SIZE
 from nf_robot.host.anchor_client import RaspiAnchorClient, max_origin_detections
 from nf_robot.host.gripper_client import RaspiGripperClient
 from nf_robot.host.arp_gripper_client import ArpeggioGripperClient, rotate_vector
 from nf_robot.host.arp_anchor_client import ArpeggioAnchorClient
 from nf_robot.host.position_estimator import Positioner2
-
-logger = logging.getLogger(__name__)
+from nf_robot.observability import OBS, init_observability
 
 # Define the service names for network discovery
 anchor_service_name = 'cranebot-anchor-service'
@@ -66,6 +107,18 @@ N_ANCHORS = {
     common.AnchorType.ARPEGGIO: 2,
 }
 N_LINES = 4
+TENSION_WAIT_TIMEOUT_S = 10.0
+TENSION_POLL_INTERVAL_S = 0.1
+TENSION_SPEED_NORM_THRESHOLD = 0.01  # m/s
+TENSION_RECORD_MAX_AGE_S = 2.0
+REFERENCE_VISUAL_MAX_AGE_S = 2.0
+CAL_DIAMOND_MIN_HALF_HEIGHT = 0.02
+CAL_DIAMOND_MIN_HALF_WIDTH = 0.05
+PASSIVE_SAFE_TENSION_N = 17.0
+PASSIVE_SAFE_TENSION_RETRY_BUMP_N = 0.5
+PASSIVE_SAFE_RETRY_WINDOW_S = 3.0
+PASSIVE_SAFE_RETRY_MOVE_MAX_AGE_S = 5.0
+PASSIVE_SAFE_RETRY_COOLDOWN_S = 10.0
 INFO_REQUEST_TIMEOUT_MS = 3000 # milliseconds
 CONTROL_PLANE_PRODUCTION = "wss://neufangled.com"
 CONTROL_PLANE_STAGING = "wss://nf-site-monolith-staging-690802609278.us-east1.run.app"
@@ -133,7 +186,23 @@ class AsyncObserver:
     Since this class serves as the coordination center of all the robot compnents, it also contains methods to perform
     various actions like calibration and the pick and place routine.
     """
-    def __init__(self, terminate_with_ui, config_path, telemetry_env=None, run_ai=True, run_ortho=True, auto_start=False, local_models=False, port=4245, use_arp_grasp=False, debug=False) -> None:
+    def __init__(
+        self,
+        terminate_with_ui,
+        config_path,
+        telemetry_env=None,
+        run_ai=True,
+        run_ortho=True,
+        auto_start=False,
+        local_models=False,
+        port=4245,
+        use_arp_grasp=False,
+        debug=False,
+        observability_debug=False,
+        observability_metrics_host=None,
+        observability_metrics_port=None,
+        observability_log_path=None,
+    ) -> None:
         self.port = port
         self.terminate_with_ui = terminate_with_ui
         self.position_update_task = None
@@ -151,8 +220,18 @@ class AsyncObserver:
         # TODO allow a command line argument to override the config file path
         self.config_path = config_path
         self.config = load_config(config_path)
-        self.telemetry_env = telemetry_env
         self.debug = debug
+        init_observability(
+            service_name="stringman-headless",
+            robot_id=getattr(self.config, "robot_id", None),
+            metrics_host=observability_metrics_host,
+            metrics_port=observability_metrics_port,
+            log_path=observability_log_path,
+            log_level="DEBUG" if debug or observability_debug else None,
+        )
+        OBS.set_expected_components(anchors=self.config.anchors, gripper=self.config.gripper is not None)
+        self.started_at = time.time()
+        self.telemetry_env = telemetry_env
         self.stat = StatCounter(self)
         self.enable_shape_tracking = False
         self.shape_tracker = None
@@ -184,6 +263,7 @@ class AsyncObserver:
         self.gip_task = None
         self.cloud_telem = None
         self.passive_safety_task = None
+        self.observability_task = None
         # last attempt to connect, keyed by service name
         self.connection_tasks: dict[str, asyncio.Task] = {}
         self.run_collect_images = False
@@ -191,6 +271,10 @@ class AsyncObserver:
         # dict of vectors representing last velocities commanded by different subsystems. all keys in active_set are summard
         self.input_velocities = {'default': np.zeros(3)}
         self.active_set = set(['default'])
+        self.last_retryable_move = None
+        self._passive_safety_tension_limit_extra_until = 0.0
+        self._passive_safety_retry_history = {}
+        self._passive_safety_last_final_prompt_ts = 0.0
         self.run_ai = run_ai
         self.run_ortho = run_ortho
         self.auto_start = auto_start
@@ -254,38 +338,86 @@ class AsyncObserver:
     async def handle_local_client(self, websocket):
         # Called when Ursina connects to a websocket that is opened to accept control commands
         self.connected_local_clients.add(websocket)
+        OBS.set_ui_clients(len(self.connected_local_clients))
         logger.info('Connection received from local UI process')
 
-        # send anything that it would need up-front
-        r = await self.send_setup_telemetry()
-        try:
-            async for message in websocket:
-                r = await self.handle_command(message) # Handle 'ControlBatchUpdate'
-                # warning, any uncaught exception here will kill this websocket connection
-                # but the observer would go on running, possibly in a bad state.
-        except (ConnectionClosedError, ConnectionClosedOK) as e:
-            pass
-        # except Exception as e:
-        #     print(e)
-        #     traceback.print_exc()
-        finally:
-            self.connected_local_clients.remove(websocket)
-            if len(self.connected_local_clients) == 0 and self.terminate_with_ui:
-                # The only local UI has disconnected and we were asked to shutdown when it disconnects
-                self.run_command_loop = False
+        with OBS.span("observer.local_ui.websocket", client_count=len(self.connected_local_clients)):
+            # send anything that it would need up-front
+            r = await self.send_setup_telemetry()
+            try:
+                async for message in websocket:
+                    r = await self.handle_command(message) # Handle 'ControlBatchUpdate'
+                    # warning, any uncaught exception here will kill this websocket connection
+                    # but the observer would go on running, possibly in a bad state.
+            except (ConnectionClosedError, ConnectionClosedOK) as e:
+                pass
+            # except Exception as e:
+            #     print(e)
+            #     traceback.print_exc()
+            finally:
+                self.connected_local_clients.remove(websocket)
+                OBS.set_ui_clients(len(self.connected_local_clients))
+                if len(self.connected_local_clients) == 0 and self.terminate_with_ui:
+                    # The only local UI has disconnected and we were asked to shutdown when it disconnects
+                    self.run_command_loop = False
 
     async def handle_command(self, message: bytes):
         """ Decodes a binary batch of commands """
         # betterproto .parse() returns a standard python dataclass
-        batch = control.ControlBatchUpdate().parse(message)
-        for update in batch.updates:
-            r = await self._dispatch_update(update)
+        started = time.time()
+        try:
+            batch = control.ControlBatchUpdate().parse(message)
+        except Exception as exc:
+            logger.warning(
+                'Ignoring malformed control batch (%d bytes): %s',
+                len(message),
+                exc,
+            )
+            self.send_ui(pop_message=telemetry.Popup(
+                message='Ignored malformed control command.'
+            ))
+            OBS.record_command("malformed_batch", time.time() - started)
+            return
+        with OBS.span("observer.handle_command_batch", bytes=len(message), updates=len(batch.updates)):
+            for update in batch.updates:
+                r = await self._dispatch_update(update)
+        OBS.record_command("batch", time.time() - started)
+
+    def _control_item_name(self, item: control.ControlItem) -> str:
+        if item.command is not None:
+            return f"command.{item.command.name}"
+        for name in (
+            "move",
+            "gantry_goal_pos",
+            "jog_spool",
+            "episode_control",
+            "scale_room",
+            "add_cam_target",
+            "delete_target",
+            "debug",
+            "set_swing_cancellation",
+            "single_component_action",
+            "manage_lerobot_session",
+            "move_gripper_to",
+        ):
+            if getattr(item, name) is not None:
+                return name
+        return "unknown"
 
     async def _dispatch_update(self, item: control.ControlItem):
         # In betterproto2, 'oneof' fields appear as attributes. 
         # Only one will be non-None.
         # not that checking if the field is truthy is insufficient, as a default instance of the proto is false
         # and default instances can carry meaningful information such as zeroing out a value.
+        command_name = self._control_item_name(item)
+        started = time.time()
+        try:
+            with OBS.span("observer.dispatch_update", command=command_name):
+                return await self._dispatch_update_inner(item)
+        finally:
+            OBS.record_command(command_name, time.time() - started)
+
+    async def _dispatch_update_inner(self, item: control.ControlItem):
         
         # Standard Commands (Stop, Calibrate, Zero)
         if item.command is not None:
@@ -355,14 +487,36 @@ class AsyncObserver:
         else:
             client = self.anchors.get(item.anchor_num, None)
         if client is not None:
+            spool_actions = (
+                control.ComponentAction.TIGHTEN,
+                control.ComponentAction.RELAX,
+                control.ComponentAction.STOW,
+            )
+            spool_num = None
+            if (
+                not item.is_gripper
+                and self.config.anchor_type == common.AnchorType.ARPEGGIO
+                and item.action in spool_actions
+            ):
+                if item.spool_num is None:
+                    logger.warning(
+                        "Ignoring ARP %s action for anchor %s without spool_num",
+                        item.action,
+                        item.anchor_num,
+                    )
+                    return
+                spool_num = int(item.spool_num)
+
             if item.action == control.ComponentAction.REBOOT:
                 r = await client.send_commands({'reboot': None})
             elif item.action == control.ComponentAction.IDENTIFY:
                 r = await client.send_commands({'identify': None})
             elif item.action == control.ComponentAction.TIGHTEN:
-                r = await client.send_commands({'tighten': None})
+                r = await client.send_commands({'tighten': spool_num})
             elif item.action == control.ComponentAction.RELAX:
-                r = await client.send_commands({'relax': None})
+                r = await client.send_commands({'relax': spool_num})
+            elif item.action == control.ComponentAction.STOW:
+                r = await client.send_commands({'stow': spool_num})
             elif item.action == control.ComponentAction.SET_CAM_ANGLE and self.config.anchor_type == common.AnchorType.ARPEGGIO:
                 self.config.anchors[item.anchor_num].indirect_line.cam_tilt = item.cam_angle
                 save_config(self.config, self.config_path)
@@ -393,19 +547,472 @@ class AsyncObserver:
         # when it seems wonky, sometimes it's because the gripper has a different timezone setting than the host!
         # come up with a way to sync them.
         try:
+            self.gripper_client.reset_swing_correction_integrator()
             self.send_ui(swing_cancellation_state=telemetry.SwingCancellationState(enabled=True, present='.'))
             self.active_set.add('swingc')
+            energy_window = deque(maxlen=120)
+            initial_energy = None
+            started = time.time()
             while self.run_command_loop:
-                vel2 = self.gripper_client.compute_swing_correction(time.time() + self.config.swing_latency)
+                now = time.time()
+                model_age = self.gripper_client.swing_model_age()
+                if model_age > MAX_SWING_MODEL_AGE_S:
+                    logger.warning('Swing cancellation disabled because IMU model is stale (%.2fs old)', model_age)
+                    self.send_ui(pop_message=telemetry.Popup(
+                        message='Swing cancellation disabled because the gripper IMU model stopped updating.'
+                    ))
+                    break
+                gain = min(max(abs(self.config.swing_gain), 0.0), MAX_SWING_GAIN)
+                max_velocity = min(max(abs(self.config.swing_max_velocity), 0.0), MAX_SWING_MAX_VELOCITY)
+                vel2 = self.gripper_client.compute_swing_correction(
+                    now + self.config.swing_latency,
+                    gain=gain,
+                    sign=self.config.swing_sign,
+                    max_velocity=max_velocity,
+                )
                 if vel2 is not None:
                     await self.move_direction_speed(np.array([vel2[0], vel2[1], 0]), key='swingc', downward_bias=0)
+
+                energy = self.gripper_client.swing_energy()
+                if energy is not None and np.isfinite(energy):
+                    energy_window.append(float(energy))
+                    if initial_energy is None and len(energy_window) >= 30:
+                        initial_energy = float(np.mean(energy_window))
+
+                    energy_limit = self._swing_amplification_limit(initial_energy) if initial_energy is not None else None
+                    if (
+                        initial_energy is not None
+                        and now - started > 4.0
+                        and self._non_swing_velocity_norm() < 0.01
+                        and np.mean(energy_window) > energy_limit
+                    ):
+                        logger.warning(
+                            'Swing cancellation energy increased from %.6f to %.6f; disabling',
+                            initial_energy,
+                            float(np.mean(energy_window)),
+                        )
+                        self.send_ui(pop_message=telemetry.Popup(
+                            message='Swing cancellation appears to amplify swing. Run swingcal before re-enabling.'
+                        ))
+                        break
                 await asyncio.sleep(1/100)
         except asyncio.CancelledError:
             pass
         finally:
-            self.active_set.remove('swingc')
+            self.input_velocities['swingc'] = np.zeros(3)
+            self.active_set.discard('swingc')
             self.send_ui(swing_cancellation_state=telemetry.SwingCancellationState(enabled=False, present='.'))
             self.slow_stop_all_spools()
+
+    def _non_swing_velocity_norm(self):
+        total = np.zeros(3)
+        for key in self.active_set:
+            if key == 'swingc':
+                continue
+            total += self.input_velocities.get(key, np.zeros(3))
+        return float(np.linalg.norm(total))
+
+    def _swing_amplification_limit(self, initial_energy):
+        floor = self.config.swing_auto_min_energy
+        if initial_energy < floor:
+            return floor * self.config.swing_auto_abort_ratio
+        return max(initial_energy * self.config.swing_auto_abort_ratio, floor)
+
+    def _swing_energy_summary(self, samples):
+        if len(samples) == 0:
+            return {
+                'mean': float('inf'),
+                'head_mean': float('inf'),
+                'tail_mean': float('inf'),
+                'ratio': float('inf'),
+                'slope': float('inf'),
+            }
+        arr = np.array(samples, dtype=float)
+        times = arr[:, 0] - arr[0, 0]
+        energies = arr[:, 1]
+        n = max(1, min(len(energies) // 4, 30))
+        head_mean = float(np.mean(energies[:n]))
+        tail_mean = float(np.mean(energies[-n:]))
+        ratio = tail_mean / max(head_mean, 1e-12)
+        slope = 0.0
+        if len(samples) >= 3 and np.max(times) > 0:
+            slope = float(np.polyfit(times, energies, 1)[0])
+        return {
+            'mean': float(np.mean(energies)),
+            'head_mean': head_mean,
+            'tail_mean': tail_mean,
+            'ratio': ratio,
+            'slope': slope,
+        }
+
+    def _swing_should_abort_calibration(self, samples, abort_energy):
+        if len(samples) == 0 or not np.isfinite(abort_energy):
+            return False
+        energies = np.array([energy for _, energy in samples[-12:]], dtype=float)
+        energies = energies[np.isfinite(energies)]
+        if len(energies) == 0:
+            return False
+        if float(np.max(energies)) > abort_energy * 1.5:
+            return True
+        return len(energies) >= 12 and float(np.mean(energies)) > abort_energy
+
+    def _swing_calibration_trial_plan(self):
+        try:
+            latency = float(getattr(self.config, 'swing_latency', DEFAULT_SWING_LATENCY))
+        except (TypeError, ValueError):
+            latency = DEFAULT_SWING_LATENCY
+        if not np.isfinite(latency):
+            latency = DEFAULT_SWING_LATENCY
+        latency = min(max(latency, 0.0), 0.8)
+        latency_candidates = []
+        for offset in (-0.10, 0.0, 0.10):
+            candidate_latency = round(min(max(latency + offset, 0.0), 0.8), 3)
+            if candidate_latency not in latency_candidates:
+                latency_candidates.append(candidate_latency)
+
+        gain = getattr(self.config, 'swing_gain', DEFAULT_SWING_GAIN)
+        gain = min(max(abs(gain or DEFAULT_SWING_GAIN), 0.006), 0.02)
+        gain_candidates = [0.006, 0.012, 0.02]
+        if gain not in gain_candidates:
+            gain_candidates.append(gain)
+        gain_candidates = sorted(set(gain_candidates))
+
+        max_velocity = getattr(self.config, 'swing_max_velocity', DEFAULT_SWING_MAX_VELOCITY)
+        max_velocity = min(max(max_velocity, 0.012), 0.03)
+
+        configured_sign = getattr(self.config, 'swing_sign', DEFAULT_SWING_SIGN)
+        configured_sign = -1.0 if configured_sign < 0 else 1.0
+        signs = [configured_sign, -configured_sign]
+        return [
+            {
+                'latency': candidate_latency,
+                'sign': sign,
+                'gain': candidate_gain,
+                'max_velocity': max_velocity,
+            }
+            for candidate_latency in latency_candidates
+            for sign in signs
+            for candidate_gain in gain_candidates
+        ]
+
+    def _swing_runtime_validation(self, samples):
+        summary = self._swing_energy_summary(samples)
+        finite_energies = [
+            float(energy)
+            for _, energy in samples
+            if energy is not None and np.isfinite(energy)
+        ]
+        if len(finite_energies) < 180:
+            return {
+                'summary': summary,
+                'enough_samples': False,
+                'initial_mean': float('inf'),
+                'runtime_mean': float('inf'),
+                'runtime_ratio': float('inf'),
+                'amplified': True,
+                'damped': False,
+            }
+
+        initial_mean = float(np.mean(finite_energies[:30]))
+        runtime_mean = float(np.mean(finite_energies[-120:]))
+        runtime_ratio = runtime_mean / max(initial_mean, 1e-12)
+        energy_limit = self._swing_amplification_limit(initial_mean)
+        score = max(summary['ratio'], runtime_ratio)
+        quiet = (
+            initial_mean < self.config.swing_auto_min_energy
+            and runtime_mean <= energy_limit
+            and summary['tail_mean'] <= energy_limit
+        ) or (
+            runtime_mean <= self.config.swing_auto_min_energy
+            and summary['tail_mean'] <= self.config.swing_auto_min_energy
+        )
+        amplified = runtime_mean > energy_limit or (not quiet and score > 1.02)
+        return {
+            'summary': summary,
+            'enough_samples': True,
+            'initial_mean': initial_mean,
+            'runtime_mean': runtime_mean,
+            'runtime_ratio': runtime_ratio,
+            'quiet': quiet,
+            'amplified': amplified,
+            'damped': quiet or (runtime_ratio <= 0.98 and summary['ratio'] <= 0.98),
+        }
+
+    def _finish_swing_calibration(self, succeeded, current_action, message=None):
+        self.send_ui(operation_progress=telemetry.OperationProgress(
+            percent_complete=100,
+            name='Swing calibration',
+            current_action=current_action,
+        ))
+        if message:
+            self.send_ui(pop_message=telemetry.Popup(message=message))
+        return succeeded
+
+    async def _sample_swing_energy(self, duration_s, interval_s=1/60):
+        samples = []
+        deadline = time.monotonic() + duration_s
+        while time.monotonic() < deadline:
+            if not isinstance(self.gripper_client, ArpeggioGripperClient) or not self.gripper_client.connected:
+                raise RuntimeError('Arpeggio gripper must be connected for swing calibration')
+            model_age = self.gripper_client.swing_model_age()
+            if model_age > MAX_SWING_MODEL_AGE_S:
+                raise RuntimeError(f'Swing IMU model is stale ({model_age:.2f}s old)')
+            energy = self.gripper_client.swing_energy()
+            if energy is not None and np.isfinite(energy):
+                samples.append((time.time(), float(energy)))
+            await asyncio.sleep(interval_s)
+        return samples
+
+    async def _induce_swing_for_calibration(self):
+        key = 'swingcal_excitation'
+        speed = min(max(self.config.swing_max_velocity, 0.015), 0.03)
+        self.active_set.add(key)
+        try:
+            for direction in (
+                np.array([1.0, 0.0, 0.0]),
+                np.array([-1.0, 0.0, 0.0]),
+            ):
+                await self.move_direction_speed(direction, speed=speed, key=key, downward_bias=0)
+                await asyncio.sleep(0.45)
+            await self.move_direction_speed(np.zeros(3), key=key, downward_bias=0)
+            await asyncio.sleep(1.0)
+        finally:
+            await self.move_direction_speed(np.zeros(3), key=key, downward_bias=0)
+            self.active_set.discard(key)
+            self.input_velocities.pop(key, None)
+            self.slow_stop_all_spools()
+
+    async def _run_swing_calibration_trial(
+            self,
+            latency,
+            sign,
+            gain,
+            max_velocity,
+            duration_s,
+            abort_energy,
+            update_integrator=True,
+    ):
+        key = 'swingcal'
+        samples = []
+        aborted = False
+        self.gripper_client.reset_swing_correction_integrator()
+        self.active_set.add(key)
+        try:
+            deadline = time.monotonic() + duration_s
+            while time.monotonic() < deadline:
+                if not isinstance(self.gripper_client, ArpeggioGripperClient) or not self.gripper_client.connected:
+                    raise RuntimeError('Arpeggio gripper disconnected during swing calibration')
+                model_age = self.gripper_client.swing_model_age()
+                if model_age > MAX_SWING_MODEL_AGE_S:
+                    raise RuntimeError(f'Swing IMU model is stale ({model_age:.2f}s old)')
+                now = time.time()
+                vel2 = self.gripper_client.compute_swing_correction(
+                    now + latency,
+                    gain=gain,
+                    sign=sign,
+                    max_velocity=max_velocity,
+                    update_integrator=update_integrator,
+                )
+                if vel2 is not None:
+                    await self.move_direction_speed(np.array([vel2[0], vel2[1], 0]), key=key, downward_bias=0)
+                energy = self.gripper_client.swing_energy()
+                if energy is not None and np.isfinite(energy):
+                    energy = float(energy)
+                    samples.append((now, energy))
+                    if self._swing_should_abort_calibration(samples, abort_energy):
+                        aborted = True
+                        logger.warning(
+                            'Swing calibration abort latency=%.3f sign=%s gain=%.3f energy=%.6f limit=%.6f',
+                            latency,
+                            sign,
+                            gain,
+                            float(np.mean([e for _, e in samples[-12:]])),
+                            abort_energy,
+                        )
+                        break
+                await asyncio.sleep(1/60)
+        finally:
+            await self.move_direction_speed(np.zeros(3), key=key, downward_bias=0)
+            self.active_set.discard(key)
+            self.input_velocities.pop(key, None)
+        return samples, aborted
+
+    async def auto_calibrate_swing_cancellation(self):
+        try:
+            return await self._auto_calibrate_swing_cancellation()
+        except asyncio.CancelledError:
+            raise
+        except RuntimeError as exc:
+            logger.warning('Swing calibration failed: %s', exc)
+            return self._finish_swing_calibration(
+                False,
+                f'Failed: {exc}',
+                str(exc),
+            )
+
+    async def _auto_calibrate_swing_cancellation(self):
+        """
+        Learn swing cancellation phase/sign/gain by running bounded low-speed trials.
+        This is a motion task and should only run while the gantry is otherwise idle.
+        """
+        if not isinstance(self.gripper_client, ArpeggioGripperClient) or not self.gripper_client.connected:
+            return self._finish_swing_calibration(
+                False,
+                'Failed: Arpeggio gripper is not connected',
+                'Swing auto calibration requires a connected Arpeggio gripper.',
+            )
+
+        was_running = self.swing_cancellation_task is not None and not self.swing_cancellation_task.done()
+        if was_running:
+            self.swing_cancellation_task.cancel()
+            try:
+                await self.swing_cancellation_task
+            except asyncio.CancelledError:
+                pass
+
+        await self.move_direction_speed(np.zeros(3), key='default', downward_bias=0)
+        self.send_ui(operation_progress=telemetry.OperationProgress(
+            percent_complete=0,
+            name='Swing calibration',
+            current_action='Measuring baseline swing',
+        ))
+
+        baseline_samples = await self._sample_swing_energy(3.0)
+        baseline = self._swing_energy_summary(baseline_samples)
+        logger.info('Swing calibration baseline: %s', baseline)
+        if baseline['mean'] < self.config.swing_auto_min_energy:
+            self.send_ui(operation_progress=telemetry.OperationProgress(
+                percent_complete=5,
+                name='Swing calibration',
+                current_action='Inducing measurable swing',
+            ))
+            await self._induce_swing_for_calibration()
+            baseline_samples = await self._sample_swing_energy(3.0)
+            baseline = self._swing_energy_summary(baseline_samples)
+            logger.info('Swing calibration baseline after excitation: %s', baseline)
+            if baseline['mean'] < self.config.swing_auto_min_energy:
+                return self._finish_swing_calibration(
+                    False,
+                    'Failed: swing remained too small to calibrate',
+                    'Swing is too small to calibrate after automatic excitation.',
+                )
+
+        abort_energy = max(
+            baseline['tail_mean'] * self.config.swing_auto_abort_ratio,
+            self.config.swing_auto_min_energy * self.config.swing_auto_abort_ratio,
+        )
+        baseline_tail = max(baseline['tail_mean'], self.config.swing_auto_min_energy)
+
+        candidates = []
+        trial_plan = self._swing_calibration_trial_plan()
+        for i, trial in enumerate(trial_plan):
+            self.send_ui(operation_progress=telemetry.OperationProgress(
+                percent_complete=10 + 65 * (i + 1) / len(trial_plan),
+                name='Swing calibration',
+                current_action=(
+                    f'Testing latency {trial["latency"]:.2f}s '
+                    f'sign {int(trial["sign"])} gain {trial["gain"]:.3f}'
+                ),
+            ))
+            samples, aborted = await self._run_swing_calibration_trial(
+                latency=trial['latency'],
+                sign=trial['sign'],
+                gain=trial['gain'],
+                max_velocity=trial['max_velocity'],
+                duration_s=2.0,
+                abort_energy=abort_energy,
+            )
+            summary = self._swing_energy_summary(samples)
+            candidate = {
+                **trial,
+                'aborted': aborted,
+                'summary': summary,
+                'score': max(summary['ratio'], summary['tail_mean'] / baseline_tail),
+            }
+            logger.info('Swing calibration candidate: %s', candidate)
+            if not aborted:
+                candidates.append(candidate)
+            await asyncio.sleep(0.25)
+
+        if len(candidates) == 0:
+            return self._finish_swing_calibration(
+                False,
+                'Failed: every candidate amplified swing',
+                'Swing calibration aborted every candidate. Check spin calibration and reduce swing.',
+            )
+
+        best = min(candidates, key=lambda c: (c['score'], c['summary']['tail_mean']))
+
+        improvement = baseline['ratio'] - best['summary']['ratio']
+        if best['summary']['ratio'] >= 0.98 and improvement < 0.03:
+            logger.warning('Swing calibration found no useful improvement. baseline=%s best=%s', baseline, best)
+            return self._finish_swing_calibration(
+                False,
+                'Failed: no candidate damped swing',
+                'Swing calibration did not find a damping setting better than baseline.',
+            )
+
+        await self.move_direction_speed(np.zeros(3), key='default', downward_bias=0)
+        await asyncio.sleep(0.5)
+        self.send_ui(operation_progress=telemetry.OperationProgress(
+            percent_complete=90,
+            name='Swing calibration',
+            current_action='Validating best setting against runtime guard',
+        ))
+        validation_abort_energy = max(
+            baseline_tail * self.config.swing_auto_abort_ratio,
+            self.config.swing_auto_min_energy * self.config.swing_auto_abort_ratio,
+        )
+        validation_samples, validation_aborted = await self._run_swing_calibration_trial(
+            latency=best['latency'],
+            sign=best['sign'],
+            gain=best['gain'],
+            max_velocity=best['max_velocity'],
+            duration_s=8.0,
+            abort_energy=validation_abort_energy,
+        )
+        validation = self._swing_runtime_validation(validation_samples)
+        if validation_aborted or validation['amplified']:
+            logger.warning(
+                'Swing calibration validation failed: baseline=%s validation=%s best=%s aborted=%s',
+                baseline,
+                validation,
+                best,
+                validation_aborted,
+            )
+            return self._finish_swing_calibration(
+                False,
+                'Failed: validation amplified swing',
+                'Swing calibration rejected the best setting because sustained validation still amplified swing.',
+            )
+        if not validation['damped']:
+            logger.warning(
+                'Swing calibration validation found no sustained damping: baseline=%s validation=%s best=%s',
+                baseline,
+                validation,
+                best,
+            )
+            return self._finish_swing_calibration(
+                False,
+                'Failed: validation did not damp swing',
+                'Swing calibration found a stable setting, but it did not reduce swing enough to save.',
+            )
+
+        self.config.swing_latency = best['latency']
+        self.config.swing_sign = best['sign']
+        self.config.swing_gain = best['gain']
+        self.config.swing_max_velocity = best['max_velocity']
+        save_config(self.config, self.config_path)
+        await self.send_setup_telemetry()
+        logger.info('Swing calibration saved: baseline=%s validation=%s best=%s', baseline, validation, best)
+        return self._finish_swing_calibration(
+            True,
+            'Completed: validated and saved',
+            (
+                f'Swing calibration saved latency={best["latency"]:.2f}s '
+                f'sign={int(best["sign"])} gain={best["gain"]:.3f}'
+            ),
+        )
 
     async def _handle_debug_command(self, item: control.Debug):
         logger.debug(f'Debug action "{item.action}"')
@@ -419,8 +1026,23 @@ class AsyncObserver:
             r = await self.stow_lines()
         if item.action.startswith('swinglatency '):
             parts = item.action.split(' ')
-            self.config.swing_latency = float(parts[1])
+            self.config.swing_latency = min(max(float(parts[1]), 0.0), 0.8)
             save_config(self.config, self.config_path)
+        if item.action.startswith('swinggain '):
+            parts = item.action.split(' ')
+            self.config.swing_gain = min(max(abs(float(parts[1])), 0.0), MAX_SWING_GAIN)
+            save_config(self.config, self.config_path)
+        if item.action.startswith('swingsign '):
+            parts = item.action.split(' ')
+            sign = float(parts[1])
+            self.config.swing_sign = -1.0 if sign < 0 else 1.0
+            save_config(self.config, self.config_path)
+        if item.action.startswith('swingmaxvel '):
+            parts = item.action.split(' ')
+            self.config.swing_max_velocity = min(max(abs(float(parts[1])), 0.0), MAX_SWING_MAX_VELOCITY)
+            save_config(self.config, self.config_path)
+        if item.action == 'swingcal':
+            r = await self.invoke_motion_task(self.auto_calibrate_swing_cancellation())
         if item.action == 'reset_wrist':
              await asyncio.create_task(self.gripper_client.send_commands({'reset_wrist': None}))
         if item.action == 'spind':
@@ -643,6 +1265,8 @@ class AsyncObserver:
                 r = await self.invoke_motion_task(self.half_auto_calibration())
             case control.Command.FULL_CAL:
                 r = await self.invoke_motion_task(self.full_auto_calibration())
+            case control.Command.AUTO_CALIBRATE_SWING:
+                r = await self.invoke_motion_task(self.auto_calibrate_swing_cancellation())
             case control.Command.PICK_AND_DROP:
                 r = await self.invoke_motion_task(self.pick_and_place_loop())
             case control.Command.HORIZONTAL_CHECK:
@@ -727,9 +1351,9 @@ class AsyncObserver:
         client = None
         if jog.is_gripper:
             if jog.speed is not None:
-                asyncio.create_task(self.gripper_client.send_commands({'jog': jog.offset}))
-            elif jog.offset is not None:
                 asyncio.create_task(self.gripper_client.send_commands({'aim_speed': jog.speed}))
+            elif jog.offset is not None:
+                asyncio.create_task(self.gripper_client.send_commands({'jog': jog.offset}))
         else:
             if jog.speed is not None:
                 await self.send_line_speed(jog.anchor_num, jog.speed)
@@ -792,19 +1416,144 @@ class AsyncObserver:
 
         self.last_user_move_time = time.time()
 
+    def _passive_safety_tension_limit(self, now=None):
+        now = time.time() if now is None else now
+        extra = PASSIVE_SAFE_TENSION_RETRY_BUMP_N if now < getattr(self, '_passive_safety_tension_limit_extra_until', 0.0) else 0.0
+        return PASSIVE_SAFE_TENSION_N + extra
+
+    def _retryable_move_signature(self, key, velocity):
+        velocity = np.asarray(velocity, dtype=float)
+        return (key, tuple(np.round(velocity, 3)))
+
+    def _record_retryable_move(self, key, velocity):
+        if key != 'default':
+            return
+        velocity = np.asarray(velocity, dtype=float)
+        if velocity.shape != (3,) or not np.all(np.isfinite(velocity)):
+            return
+        if float(np.linalg.norm(velocity)) < 0.005:
+            return
+        signature = self._retryable_move_signature(key, velocity)
+        self.last_retryable_move = {
+            'key': key,
+            'velocity': velocity.copy(),
+            'signature': signature,
+            'ts': time.time(),
+        }
+
+    def _get_passive_safety_retry_move(self, now=None):
+        now = time.time() if now is None else now
+        move = getattr(self, 'last_retryable_move', None)
+        if not move:
+            return None
+        if now - move.get('ts', 0.0) > PASSIVE_SAFE_RETRY_MOVE_MAX_AGE_S:
+            return None
+        history = getattr(self, '_passive_safety_retry_history', {})
+        last_retry = history.get(move['signature'], 0.0)
+        if now - last_retry < PASSIVE_SAFE_RETRY_COOLDOWN_S:
+            return None
+        return move
+
+    async def _stop_for_passive_tension_limit(self):
+        if self.swing_cancellation_task is not None and not self.swing_cancellation_task.done():
+            self.swing_cancellation_task.cancel()
+        for key in list(self.active_set):
+            self.input_velocities[key] = np.zeros(3)
+        self.active_set = set(['default'])
+        self.slow_stop_all_spools()
+        await self._handle_disable_torque()
+        await asyncio.sleep(1)
+        await self._handle_enable_torque()
+        await asyncio.sleep(1)
+
+    def _send_passive_safety_popup(self, message, now=None, throttle_s=0.0):
+        now = time.time() if now is None else now
+        if throttle_s > 0 and now - getattr(self, '_passive_safety_last_final_prompt_ts', 0.0) < throttle_s:
+            return
+        if throttle_s > 0:
+            self._passive_safety_last_final_prompt_ts = now
+        self.send_ui(pop_message=telemetry.Popup(message=message))
+
+    async def _handle_passive_tension_limit(self, ema, limit):
+        now = time.time()
+        high_lines = [int(i) for i in np.where(np.asarray(ema) > limit)[0]]
+        retry_window_active = now < getattr(self, '_passive_safety_tension_limit_extra_until', 0.0)
+        retry_move = None if retry_window_active else self._get_passive_safety_retry_move(now)
+
+        await self._stop_for_passive_tension_limit()
+
+        if retry_move is None:
+            self._passive_safety_tension_limit_extra_until = 0.0
+            if retry_window_active:
+                message = (
+                    f'Tension stayed above {limit:.1f} N during the retry on lines {high_lines}. '
+                    'I stopped and left the robot idle. Check for a caught line before moving again.'
+                )
+            else:
+                message = (
+                    f'Tension exceeded {limit:.1f} N on lines {high_lines}. '
+                    'I stopped and left the robot idle. Check the lines, then retry manually.'
+                )
+            logger.warning(message)
+            self._send_passive_safety_popup(message, now=now, throttle_s=5.0)
+            return False
+
+        retry_limit = PASSIVE_SAFE_TENSION_N + PASSIVE_SAFE_TENSION_RETRY_BUMP_N
+        self._passive_safety_retry_history[retry_move['signature']] = now
+        self._passive_safety_tension_limit_extra_until = now + PASSIVE_SAFE_RETRY_WINDOW_S
+        message = (
+            f'Tension exceeded {limit:.1f} N on lines {high_lines}. '
+            f'I backed off, temporarily raised the retry limit to {retry_limit:.1f} N, '
+            'and I am trying the last move once more.'
+        )
+        logger.warning(message)
+        self._send_passive_safety_popup(message)
+        await self.move_direction_speed(
+            retry_move['velocity'],
+            speed=None,
+            starting_pos=self.pe.gant_pos,
+            downward_bias=0,
+            key=retry_move.get('key', 'default'),
+            record_retry=False,
+        )
+        return True
+
     async def passive_safety(self):
         """If any line becomes too tight, switch all motors to damped movement for one second."""
-        MAX_SAFE_TENSION = 16.0 # Newtons.
         ema = np.zeros(4)
         while self.run_command_loop and self.pe.tension is not None:
             ema = ema * 0.9 + self.pe.tension * 0.1
-            if np.any(ema > MAX_SAFE_TENSION):
+            max_safe_tension = self._passive_safety_tension_limit()
+            OBS.record_tension(ema, max_safe_tension)
+            if np.any(ema > max_safe_tension):
+                OBS.record_safety_stop()
                 logger.warning('Tension limit reached! backing off.')
-                await self._handle_disable_torque()
-                await asyncio.sleep(1)
-                await self._handle_enable_torque()
-                await asyncio.sleep(1)
+                await self._handle_passive_tension_limit(ema, max_safe_tension)
             await asyncio.sleep(0.2)
+
+    async def update_observability_runtime(self):
+        while self.run_command_loop:
+            OBS.set_uptime(self.started_at)
+            OBS.set_ui_clients(len(self.connected_local_clients))
+            with self.telemetry_buffer_lock:
+                telemetry_buffer_size = len(self.telemetry_buffer)
+                OBS.set_telemetry_buffer(telemetry_buffer_size)
+            connected_components = {}
+            for client in self.bot_clients.values():
+                kind = "gripper" if getattr(client, "anchor_num", None) is None else "anchor"
+                component = "gripper" if kind == "gripper" else f"anchor_{client.anchor_num}"
+                status = getattr(getattr(client, "conn_status", None), "websocket_status", None)
+                connected_components[(component, kind)] = status == telemetry.ConnStatus.CONNECTED
+            target_count = len(getattr(self.target_queue.get_queue_snapshot(), "targets", []) or [])
+            OBS.record_runtime_state(
+                connected_components=connected_components,
+                gripper_present=self.gripper_client is not None,
+                anchor_count=len(self.anchors),
+                active_velocity_keys=self.active_set,
+                telemetry_buffer_size=telemetry_buffer_size,
+                target_count=target_count,
+            )
+            await asyncio.sleep(1.0)
 
     def update_avg_named_pos(self, key: str, position: np.ndarry):
         """Update the running average of the named position"""
@@ -871,35 +1620,131 @@ class AsyncObserver:
                 asyncio.create_task(client.send_commands({'stow': 0}))
                 asyncio.create_task(client.send_commands({'stow': 1}))
 
-    async def wait_for_tension(self):
-        """this function returns only once all anchors are reporting tight lines in their regular line record"""
-        POLL_INTERVAL_S = 0.1 # seconds
-        SPEED_SUM_THRESHOLD = 0.01 # m/s
+    def _line_records_for_tension(self, max_age_s=TENSION_RECORD_MAX_AGE_S):
+        try:
+            records = np.array([alr.getLast() for alr in self.datastore.anchor_line_record], dtype=float)
+        except Exception:
+            logger.exception('Failed to read anchor line records while waiting for tension')
+            return None
+
+        if records.ndim != 2 or records.shape[0] != N_LINES or records.shape[1] < 4:
+            logger.warning(f'Invalid line record shape while waiting for tension: {records.shape}')
+            return None
+
+        now = time.time()
+        timestamps = records[:, 0]
+        values = records[:, 1:4]
+        if not np.all(np.isfinite(timestamps)) or not np.all(np.isfinite(values)):
+            logger.warning(f'Invalid line records while waiting for tension: {records}')
+            return None
+        if np.any(timestamps <= 0) or np.any(now - timestamps > max_age_s):
+            logger.warning(f'Stale line records while waiting for tension: ages={now - timestamps}')
+            return None
+        return records
+
+    async def wait_for_tension(
+        self,
+        timeout_s=TENSION_WAIT_TIMEOUT_S,
+        poll_interval_s=TENSION_POLL_INTERVAL_S,
+    ):
+        """Return True only after all lines are taut and settled; stop spools on failure."""
         threshold = 0.5
         if self.config.anchor_type == common.AnchorType.ARPEGGIO:
             threshold = TENSION_THRESH
-        
-        complete = False
-        timeout = time.time() + 10
-        while not complete and time.time() < timeout:
-            await asyncio.sleep(POLL_INTERVAL_S)
-            records = np.array([alr.getLast() for alr in self.datastore.anchor_line_record])
-            speeds = np.array(records[:,2])
-            tension = np.array(records[:,3])
-            complete = np.all(tension > threshold) and abs(np.sum(speeds)) < SPEED_SUM_THRESHOLD
-        logger.debug(f'tension on lines = {tension}')
-        return True
+
+        last_tension = np.full(N_LINES, np.nan)
+        last_speed_norm = np.nan
+        timeout = time.time() + timeout_s
+        while time.time() < timeout:
+            await asyncio.sleep(poll_interval_s)
+            records = self._line_records_for_tension()
+            if records is None:
+                continue
+
+            speeds = records[:, 2]
+            tension = records[:, 3]
+            last_tension = tension
+            last_speed_norm = float(np.linalg.norm(speeds))
+            if np.all(tension > threshold) and last_speed_norm < TENSION_SPEED_NORM_THRESHOLD:
+                logger.debug(f'tension on lines = {tension}, speed_norm={last_speed_norm}')
+                return True
+
+        logger.warning(
+            f'Timed out waiting for line tension. tension={last_tension}, '
+            f'speed_norm={last_speed_norm}, threshold={threshold}'
+        )
+        self.slow_stop_all_spools()
+        return False
 
     async def tension_and_wait(self):
         """Send tightening command and wait until lines appear tight. This is not a motion task"""
         logger.info('Tightening all lines')
         await self.tension_lines()
-        await self.wait_for_tension()
+        ok = await self.wait_for_tension()
+        if not ok:
+            logger.warning('Line tension failed; calibration/motion caller must abort before saving references')
+        return ok
+
+    def _fresh_gantry_reference_position(
+        self,
+        max_age_s=REFERENCE_VISUAL_MAX_AGE_S,
+        min_unique_anchors=None,
+    ):
+        try:
+            data = np.array(self.datastore.gantry_pos.deepCopy(), dtype=float)
+        except Exception:
+            logger.exception('Failed to read gantry visual data before reference length reset')
+            return None
+
+        if data.ndim != 2 or data.shape[1] < 5:
+            logger.warning(f'Invalid gantry visual data shape before reference length reset: {data.shape}')
+            return None
+
+        expected_anchors = len(getattr(self, 'anchors', {}))
+        if min_unique_anchors is None:
+            min_unique_anchors = min(2, max(1, expected_anchors))
+
+        now = time.time()
+        timestamps = data[:, 0]
+        positions = data[:, 2:5]
+        valid = (
+            (timestamps > 0)
+            & np.all(np.isfinite(positions), axis=1)
+            & np.isfinite(data[:, 1])
+        )
+        fresh = data[valid & ((now - timestamps) <= max_age_s)]
+        if len(fresh) == 0:
+            logger.warning('No fresh finite gantry visual observations available for reference length reset')
+            return None
+
+        unique_anchors = np.unique(fresh[:, 1].astype(int))
+        if len(unique_anchors) < min_unique_anchors:
+            logger.warning(
+                f'Not enough fresh gantry visual anchors for reference length reset: '
+                f'{len(unique_anchors)} < {min_unique_anchors}'
+            )
+            return None
+
+        position = np.mean(fresh[:, 2:5], axis=0)
+        if not np.all(np.isfinite(position)):
+            logger.warning(f'Invalid gantry visual mean before reference length reset: {position}')
+            return None
+        return position
 
     async def sendReferenceLengths(self, lengths):
-        if len(lengths) != N_LINES:
-            logger.warning(f'Cannot send {len(lengths)} ref lengths to anchors')
-            return
+        lengths = np.asarray(lengths, dtype=float)
+        if lengths.ndim != 1 or lengths.shape[0] != N_LINES:
+            logger.warning(f'Cannot send {lengths.shape} ref lengths to anchors')
+            return False
+        if not np.all(np.isfinite(lengths)) or np.any(lengths <= 0):
+            logger.warning(f'Cannot send invalid reference lengths to anchors: {lengths}')
+            return False
+
+        position = self._fresh_gantry_reference_position()
+        if position is None:
+            logger.warning('Cannot send reference lengths without fresh visual gantry data')
+            return False
+
         if self.config.anchor_type == common.AnchorType.PILOT:
             # any anchor that receives this and is slack would ignore it
             # If only some anchors are connected, this would still send reference lengths to those
@@ -919,14 +1764,16 @@ class AsyncObserver:
                 asyncio.create_task(self.gripper_client.send_commands({'reference_length': winch_length}))
 
         # reset biases on kalman filter
-        data = self.datastore.gantry_pos.deepCopy()
-        position = np.mean(data[:,2:], axis=0)
         logger.debug(f'Resetting filter biases with assumed position of {position}')
         self.pe.kf.reset_biases(position)
+        return True
 
     async def stop_all(self):
         # If lerobot scripts are connected this must also stop them
         self.send_ui(episode_control=common.EpisodeControl(command=common.EpCommand.ABANDON))
+
+        if self.swing_cancellation_task is not None and not self.swing_cancellation_task.done():
+            self.swing_cancellation_task.cancel()
 
         # Cancel any active motion task
         if self.motion_task is not None:
@@ -953,7 +1800,44 @@ class AsyncObserver:
                 logger.error(f"An unhandled exception occurred in motion task '{task_to_stop.get_name()}':\n{e}")
                 traceback.print_exc()
 
+        self._clear_motion_inputs()
         self.slow_stop_all_spools()
+        await self._restore_calibration_cleanup()
+
+    def _clear_motion_inputs(self):
+        if not hasattr(self, 'input_velocities') or self.input_velocities is None:
+            self.input_velocities = {}
+        for key in list(self.input_velocities):
+            self.input_velocities[key] = np.zeros(3)
+        self.input_velocities['default'] = np.zeros(3)
+        self.active_set = set(['default'])
+
+    async def _set_arp_direct_line_anti_tangle(self, enabled):
+        if getattr(self, 'config', None) is None or self.config.anchor_type != common.AnchorType.ARPEGGIO:
+            return
+        for anchor_num in (0, 1):
+            client = self.anchors.get(anchor_num, None)
+            if client is None:
+                continue
+            try:
+                await client.send_commands({'set_anti_tangle': (enabled, 0)})
+            except Exception:
+                logger.exception(
+                    'Failed to set anti-tangle enabled=%s on anchor %s during cleanup',
+                    enabled,
+                    anchor_num,
+                )
+
+    async def _restore_calibration_cleanup(self):
+        gripper_client = getattr(self, 'gripper_client', None)
+        if gripper_client is not None and hasattr(gripper_client, 'calibrating_room_spin'):
+            gripper_client.calibrating_room_spin = False
+        for client in getattr(self, 'anchors', {}).values():
+            if hasattr(client, 'save_raw'):
+                client.save_raw = False
+            if hasattr(client, 'calibrating_room_spin'):
+                client.calibrating_room_spin = False
+        await self._set_arp_direct_line_anti_tangle(True)
 
     def slow_stop_all_spools(self):
         for name, client in self.bot_clients.items():
@@ -1004,6 +1888,125 @@ class AsyncObserver:
         ])
         self.pe.set_anchor_points(anchor_points)
 
+    def _new_calibration_artifact(self, calibration_name):
+        anchor_type = getattr(getattr(self, 'config', None), 'anchor_type', None)
+        metadata = {
+            'calibration_name': calibration_name,
+            'anchor_type': getattr(anchor_type, 'name', str(anchor_type)),
+            'config_path': getattr(self, 'config_path', None),
+        }
+        return CalibrationArtifactSession(metadata=metadata)
+
+    def _write_calibration_artifact(self, artifact, status=None, message=None):
+        if artifact is None:
+            return None
+        try:
+            return artifact.write(status=status, message=message)
+        except Exception:
+            logger.exception('Failed to write calibration artifact')
+            return None
+
+    def _origin_detection_counts(self):
+        return {
+            int(getattr(client, 'anchor_num', anchor_num)): len(client.origin_poses['origin'])
+            for anchor_num, client in self.anchors.items()
+        }
+
+    def _origin_visible_anchor_nums(self, counts):
+        return sorted([anum for anum, count in counts.items() if count > 0])
+
+    def _diamond_center_xy(self):
+        pe = getattr(self, 'pe', None)
+        for attr in ('visual_pos', 'gant_pos', 'hang_pos'):
+            point = getattr(pe, attr, None)
+            if point is None:
+                continue
+            point = np.asarray(point, dtype=float)
+            if point.shape[0] >= 2 and np.all(np.isfinite(point[:2])):
+                return point[:2]
+
+        work_area = getattr(pe, 'work_area', None)
+        if work_area is not None:
+            try:
+                area = np.asarray(work_area, dtype=float)
+                if area.ndim == 3 and area.shape[1] == 1:
+                    area = area[:, 0, :]
+                if area.ndim == 2 and area.shape[1] >= 2 and len(area) > 0:
+                    area_xy = area[:, :2]
+                    if np.all(np.isfinite(area_xy)):
+                        return np.mean(area_xy, axis=0)
+            except (TypeError, ValueError):
+                pass
+        return np.zeros(2, dtype=float)
+
+    def _diamond_probe_points(self, center_xy, half_h, half_w):
+        center_xy = np.asarray(center_xy, dtype=float)
+        return [
+            center_xy + np.array([0.0, -half_h]),
+            center_xy + np.array([half_w, 0.0]),
+            center_xy + np.array([0.0, half_h]),
+            center_xy + np.array([-half_w, 0.0]),
+        ]
+
+    def _adaptive_diamond_size(self, default_size=DIAMOND_SIZE):
+        """Shrink the Arpeggio diamond to fit the configured work area, if any."""
+        half_h, half_w = [float(x) for x in default_size]
+        pe = getattr(self, 'pe', None)
+        work_area = getattr(pe, 'work_area', None)
+        if pe is None or work_area is None:
+            return half_h, half_w
+
+        try:
+            if np.asarray(work_area).size == 0:
+                return half_h, half_w
+        except (TypeError, ValueError):
+            raise RuntimeError(f'Invalid work area for diamond calibration: {work_area}')
+
+        center_xy = self._diamond_center_xy()
+        for _ in range(16):
+            if half_h < CAL_DIAMOND_MIN_HALF_HEIGHT or half_w < CAL_DIAMOND_MIN_HALF_WIDTH:
+                break
+            probe_points = self._diamond_probe_points(center_xy, half_h, half_w)
+            if all(pe.point_inside_work_area_2d(point) for point in probe_points):
+                return half_h, half_w
+            half_h *= 0.75
+            half_w *= 0.75
+
+        raise RuntimeError(
+            'No safe Arpeggio eyelet calibration diamond fits the configured work area '
+            f'around center {center_xy}'
+        )
+
+    def _require_gantry_observations(self, label, min_anchor_count=1):
+        gantry_obs = self.snapshot_tag_observations().get('gantry', [])
+        counts = [len(obs) for obs in gantry_obs]
+        anchors_with_obs = sum(count > 0 for count in counts)
+        if anchors_with_obs < min_anchor_count:
+            raise RuntimeError(
+                f'No usable gantry observations for diamond {label}; counts={counts}'
+            )
+        return gantry_obs
+
+    async def _wait_for_diamond_lines_to_stop(self, deadband=0.05, timeout=30):
+        await asyncio.sleep(2)
+        deadline = asyncio.get_event_loop().time() + timeout
+        speed1 = np.nan
+        speed3 = np.nan
+        while asyncio.get_event_loop().time() < deadline:
+            speed1 = abs(self.datastore.anchor_line_record[1].getLast()[2])
+            speed3 = abs(self.datastore.anchor_line_record[3].getLast()[2])
+            if speed1 < deadband and speed3 < deadband:
+                await asyncio.sleep(2)
+                return True
+            await asyncio.sleep(1/30)
+
+        await self.send_line_speed(1, 0)
+        await self.send_line_speed(3, 0)
+        raise RuntimeError(
+            f'Diamond lines did not settle before timeout: '
+            f'line1_speed={speed1:.4f}m/s line3_speed={speed3:.4f}m/s'
+        )
+
     async def touch_floor(self):
         await self.gripper_client.send_commands({'set_finger_angle': -30})
         laser_range = self.datastore.range_record.getLast()[1]
@@ -1044,15 +2047,19 @@ class AsyncObserver:
                 return t0,t2
 
             # relax direct lines
-            await self.anchors[0].send_commands({'set_anti_tangle': (False, 0)})
-            await self.anchors[1].send_commands({'set_anti_tangle': (False, 0)})
+            await self._set_arp_direct_line_anti_tangle(False)
             t0,t2 = get_direct_tensions()
-            while t0 > 0.1 and t2 > 0.1:
-                await self.send_line_speed(0,  0.1)
-                await self.send_line_speed(2,  0.1)
+            direct_relax_deadline = time.time() + 10
+            while t0 > 0.1 or t2 > 0.1:
+                if time.time() > direct_relax_deadline:
+                    raise RuntimeError(f'Direct lines did not relax before timeout: line0={t0:.3f}N line2={t2:.3f}N')
+                await self.send_line_speed(0,  0.1 if t0 > 0.1 else 0)
+                await self.send_line_speed(2,  0.1 if t2 > 0.1 else 0)
                 await asyncio.sleep(0.1)
                 t0,t2 = get_direct_tensions()
                 print((t0,t2))
+            await self.send_line_speed(0, 0)
+            await self.send_line_speed(2, 0)
             # another 30 cm
             await self.send_line_speed(0,  0.3, jog=True)
             await self.send_line_speed(2,  0.3, jog=True)
@@ -1064,7 +2071,11 @@ class AsyncObserver:
             await asyncio.sleep(1)
             self.slow_stop_all_spools()
 
-            half_h, half_w = DIAMOND_SIZE
+            half_h, half_w = self._adaptive_diamond_size()
+            logger.info(
+                f'Using Arpeggio calibration diamond half-height={half_h:.3f}m '
+                f'half-width={half_w:.3f}m'
+            )
 
             results = {}
             line_deltas = {}
@@ -1075,18 +2086,6 @@ class AsyncObserver:
                 l3 = self.datastore.anchor_line_record[3].getLast()[1]
                 return l1, l3
 
-            async def wait_for_lines_to_stop(deadband=0.05, timeout=30):
-                await asyncio.sleep(2)
-                deadline = asyncio.get_event_loop().time() + timeout
-                while asyncio.get_event_loop().time() < deadline:
-                    speed1 = abs(self.datastore.anchor_line_record[1].getLast()[2])
-                    speed3 = abs(self.datastore.anchor_line_record[3].getLast()[2])
-                    if speed1 < deadband and speed3 < deadband:
-                        await asyncio.sleep(2)
-                        return
-                    await asyncio.sleep(1/30)
-                logger.warning('wait_for_lines_to_stop timed out; proceeding with current line lengths')
-
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=20.0,
                 name="Calibration",
@@ -1094,7 +2093,7 @@ class AsyncObserver:
             ))
             logger.info('This position is the bottom of the diamond. Observe gantry for 2 seconds')
             await asyncio.sleep(5)
-            results['bottom'] = self.snapshot_tag_observations()['gantry']
+            results['bottom'] = self._require_gantry_observations('bottom')
 
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=25.0,
@@ -1108,14 +2107,14 @@ class AsyncObserver:
             await self.send_line_speed(3, half_w-half_h, jog=True)
             await self.send_line_speed(0,  0.3, jog=True)
             await self.send_line_speed(2,  0.3, jog=True)
-            await wait_for_lines_to_stop()
+            await self._wait_for_diamond_lines_to_stop()
             await self.send_line_speed(1, 0)
             await self.send_line_speed(3, 0)
             l1_after, l3_after = get_eyelet_lengths()
             line_deltas['bot_to_rig'] = (l1_after - l1_before, l3_after - l3_before)
             logger.info(f'bot_to_rig actual deltas: line1={line_deltas["bot_to_rig"][0]:.4f}, line3={line_deltas["bot_to_rig"][1]:.4f}')
             await asyncio.sleep(5)
-            results['right'] = self.snapshot_tag_observations()['gantry'] # it is to the right from the perspective of camera 0
+            results['right'] = self._require_gantry_observations('right') # it is to the right from the perspective of camera 0
 
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=30.0,
@@ -1127,14 +2126,14 @@ class AsyncObserver:
             l1_before, l3_before = get_eyelet_lengths()
             await self.send_line_speed(1, half_w-half_h, jog=True)
             await self.send_line_speed(3, -half_w-half_h, jog=True)
-            await wait_for_lines_to_stop()
+            await self._wait_for_diamond_lines_to_stop()
             await self.send_line_speed(1, 0)
             await self.send_line_speed(3, 0)
             l1_after, l3_after = get_eyelet_lengths()
             line_deltas['rig_to_top'] = (l1_after - l1_before, l3_after - l3_before)
             logger.info(f'rig_to_top actual deltas: line1={line_deltas["rig_to_top"][0]:.4f}, line3={line_deltas["rig_to_top"][1]:.4f}')
             await asyncio.sleep(5)
-            results['top'] = self.snapshot_tag_observations()['gantry']
+            results['top'] = self._require_gantry_observations('top')
 
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=35.0,
@@ -1148,22 +2147,21 @@ class AsyncObserver:
             await self.send_line_speed(3, -half_w+half_h, jog=True)
             await self.send_line_speed(0,  0.1, jog=True)
             await self.send_line_speed(2,  0.1, jog=True)
-            await wait_for_lines_to_stop()
+            await self._wait_for_diamond_lines_to_stop()
             await self.send_line_speed(1, 0)
             await self.send_line_speed(3, 0)
             l1_after, l3_after = get_eyelet_lengths()
             line_deltas['top_to_lef'] = (l1_after - l1_before, l3_after - l3_before)
             logger.info(f'top_to_lef actual deltas: line1={line_deltas["top_to_lef"][0]:.4f}, line3={line_deltas["top_to_lef"][1]:.4f}')
             await asyncio.sleep(5)
-            results['left'] = self.snapshot_tag_observations()['gantry']
+            results['left'] = self._require_gantry_observations('left')
 
             # set back anti tangle to normal function 
-            await self.anchors[0].send_commands({'set_anti_tangle': (True, 0)})
-            await self.anchors[1].send_commands({'set_anti_tangle': (True, 0)})
+            await self._set_arp_direct_line_anti_tangle(True)
 
             logger.info('Return result')
             for a in self.anchors.values():
-                a.save_raw = True
+                a.save_raw = False
 
             analyze_diamond_data(results, anchor_poses, tilts)
 
@@ -1173,6 +2171,7 @@ class AsyncObserver:
             raise
         finally:
             self.slow_stop_all_spools()
+            await self._restore_calibration_cleanup()
     
     async def half_auto_calibration(self):
         """
@@ -1194,11 +2193,24 @@ class AsyncObserver:
                 need_sc_restart = True
 
             for direction in [[0,0,1], [0,0,-1]]:
-                await self.tension_and_wait()
+                if not await self.tension_and_wait():
+                    self.send_ui(operation_progress=telemetry.OperationProgress(
+                        percent_complete=100.0,
+                        name="Calibration",
+                        current_action="Calibration failed: line tension did not settle",
+                    ))
+                    return False
                 # wait for some new obs
                 await asyncio.sleep(0.5)
                 lengths = np.linalg.norm(self.pe.anchor_points - self.pe.visual_pos, axis=1)
-                await self.sendReferenceLengths(lengths)
+                if not await self.sendReferenceLengths(lengths):
+                    self.slow_stop_all_spools()
+                    self.send_ui(operation_progress=telemetry.OperationProgress(
+                        percent_complete=100.0,
+                        name="Calibration",
+                        current_action="Calibration failed: reference length data was invalid",
+                    ))
+                    return False
                 await asyncio.sleep(0.25)
                 # move in direction for short time
                 await self.move_direction_speed(direction, 0.05, downward_bias=0)
@@ -1207,6 +2219,7 @@ class AsyncObserver:
 
             if need_sc_restart:
                 self.swing_cancellation_task = asyncio.create_task(self.run_swing_cancellation())
+            return True
 
         except asyncio.CancelledError:
             raise
@@ -1214,21 +2227,30 @@ class AsyncObserver:
     async def full_auto_calibration(self):
         """Automatically determine anchor poses and zero angles
         This is a motion task"""
+        calibration_artifact = self._new_calibration_artifact('full_auto_calibration')
+        calibration_artifact.set_phase('start')
         self.send_ui(operation_progress=telemetry.OperationProgress(
             percent_complete=0.0,
             name="Calibration",
             current_action="Observing markers",
         ))
         finger_task = None
+        swing_calibration_ok = None
         DETECTION_WAIT_S = 1.0 # seconds
         try:
             if len(self.anchors) < N_ANCHORS[self.config.anchor_type]:
+                calibration_artifact.fail(
+                    'not all anchors connected',
+                    connected_anchors=len(self.anchors),
+                    expected_anchors=N_ANCHORS[self.config.anchor_type],
+                )
+                self._write_calibration_artifact(calibration_artifact)
                 self.send_ui(operation_progress=telemetry.OperationProgress(
                     percent_complete=100.0,
                     name="Calibration",
                     current_action='Cannot run full calibration until all anchors are connected',
                 ))
-                return
+                return False
             elif len(self.anchors) > N_ANCHORS[self.config.anchor_type]:
                 logger.warning(f'Too many anchors found for type {self.config.anchor_type} \n{self.anchors}')
             # collect observations of origin card aruco marker to get initial guess of anchor poses.
@@ -1236,27 +2258,44 @@ class AsyncObserver:
             #   it is only necessary to ensure enough have been collected from each client and average them.
             for a in self.anchors.values():
                 a.save_raw = True
-            num_o_dets = []
+            origin_counts = {}
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=2.0,
                 name="Calibration",
                 current_action="Observing markers",
             ))
+            calibration_artifact.set_phase('origin_marker_capture')
             detecting_start = time.time()
-            while len(num_o_dets) == 0 or min(num_o_dets) < max_origin_detections:
-                logger.debug(f'Waiting for enough origin card detections from every anchor camera {num_o_dets}')
+            while (
+                len(origin_counts) == 0
+                or len(origin_counts) < N_ANCHORS[self.config.anchor_type]
+                or min(origin_counts.values()) < max_origin_detections
+            ):
+                logger.debug(f'Waiting for enough origin card detections from every anchor camera {origin_counts}')
                 self.send_ui(visibility_states=telemetry.VisibilityStates(anchors_seeing_origin_card=list(
-                    [anum for anum, count in enumerate(num_o_dets) if count > 0] # only anchor nums which see the origin card
+                    self._origin_visible_anchor_nums(origin_counts)
                 )))
 
                 await asyncio.sleep(DETECTION_WAIT_S)
-                num_o_dets = [len(client.origin_poses['origin']) for client in self.anchors.values()]
-            logger.info(f'Collected enough observations {num_o_dets}')
+                origin_counts = self._origin_detection_counts()
+            logger.info(f'Collected enough observations {origin_counts}')
+            calibration_artifact.record_observation(
+                kind='origin_visibility',
+                counts=origin_counts,
+                elapsed_s=time.time() - detecting_start,
+            )
             self.send_ui(visibility_states=telemetry.VisibilityStates(anchors_seeing_origin_card=list(
-                [anum for anum, count in enumerate(num_o_dets) if count > 0] # only anchor nums which see the origin card
+                self._origin_visible_anchor_nums(origin_counts)
             )))
 
             raw_obs = self.snapshot_tag_observations()
+            calibration_artifact.record_observation(
+                kind='raw_marker_snapshot',
+                marker_counts={
+                    marker: [len(anchor_obs) for anchor_obs in sightings]
+                    for marker, sightings in raw_obs.items()
+                },
+            )
 
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=12.0,
@@ -1265,10 +2304,15 @@ class AsyncObserver:
             ))
 
             if self.config.anchor_type == common.AnchorType.ARPEGGIO:
+                calibration_artifact.set_phase('arpeggio_anchor_solve')
                 tilts = (self.config.anchors[0].indirect_line.cam_tilt, self.config.anchors[1].indirect_line.cam_tilt)
                 # determine position of two anchors visually and guess at external eyelets.
-                async_result = self.pool.apply_async(optimize_arp_anchors, (raw_obs, None, None, None, tilts))
+                async_result = self.pool.apply_async(optimize_arp_anchors, (raw_obs, None, None, None, None, tilts))
                 anchor_poses, eyelet_positions = async_result.get(timeout=30)
+                calibration_artifact.record_optimizer_report(
+                    name='arpeggio_anchor_initial',
+                    success=anchor_poses is not None and eyelet_positions is not None,
+                )
                 logger.info(f'Obtained result from optimize_arp_anchors anchor_poses=\n{anchor_poses}\neyelet_positions=\n{eyelet_positions}')
 
                 self.save_poses_arp(anchor_poses, eyelet_positions)
@@ -1277,7 +2321,10 @@ class AsyncObserver:
                     name="Calibration",
                     current_action="Collecting proprioceptive data",
                 ))
-                await self.half_auto_calibration()
+                if await self.half_auto_calibration() is False:
+                    calibration_artifact.fail('half calibration failed before eyelet solve')
+                    self._write_calibration_artifact(calibration_artifact)
+                    return False
 
                 # measure finger contact and reset wrist while doing the diamond pattern to save time.
                 async def wait_then_finger():
@@ -1288,7 +2335,16 @@ class AsyncObserver:
                 finger_task = asyncio.create_task(wait_then_finger())
 
                 # collect length_change_data data to estimate eyelets better
+                calibration_artifact.set_phase('arpeggio_eyelet_probe')
                 diamond_data, line_deltas = await self.collect_arp_anchor_eyelet_experiment_data(anchor_poses)
+                calibration_artifact.record_observation(
+                    kind='arpeggio_diamond',
+                    line_deltas=line_deltas,
+                    gantry_counts={
+                        key: [len(anchor_obs) for anchor_obs in value]
+                        for key, value in diamond_data.items()
+                    },
+                )
                 # stop saving raw poses
                 for a in self.anchors.values():
                     a.save_raw = False
@@ -1297,19 +2353,29 @@ class AsyncObserver:
                 # with open('arp_opt_data.pkl', 'wb') as f:
                 #     pickle.dump(args, f)
                 # optimize again with length_change_data
+                calibration_artifact.set_phase('arpeggio_eyelet_solve')
                 async_result = self.pool.apply_async(optimize_arp_anchors, args)
                 anchor_poses, eyelet_positions = async_result.get(timeout=30)
+                calibration_artifact.record_optimizer_report(
+                    name='arpeggio_eyelet',
+                    success=anchor_poses is not None and eyelet_positions is not None,
+                )
                 logger.info(f'Obtained result from optimize_arp_anchors anchor_poses=\n{anchor_poses}\neyelet_positions=\n{eyelet_positions}')
 
                 self.save_poses_arp(anchor_poses, eyelet_positions)
 
             else:
+                calibration_artifact.set_phase('pilot_anchor_solve')
                 for a in self.anchors.values():
                     a.save_raw = False
 
                 # run optimization in pool
                 async_result = self.pool.apply_async(optimize_anchor_poses, (raw_obs,))
                 anchor_poses = async_result.get(timeout=30)
+                calibration_artifact.record_optimizer_report(
+                    name='pilot_anchor',
+                    success=anchor_poses is not None,
+                )
                 logger.info(f'Obtained result from find_cal_params anchor_poses=\n{anchor_poses}')
                 anchor_poses = np.array(anchor_poses)
 
@@ -1333,10 +2399,14 @@ class AsyncObserver:
                 name="Calibration",
                 current_action="Tensioning lines and Locating Gripper",
             ))
-            await self.half_auto_calibration()
+            if await self.half_auto_calibration() is False:
+                calibration_artifact.fail('half calibration failed after anchor solve')
+                self._write_calibration_artifact(calibration_artifact)
+                return False
 
             # open grip enough that we can see an unobstructed view from the palm camera
-            await finger_task
+            if finger_task is not None:
+                await finger_task
             asyncio.create_task(self.gripper_client.send_commands({'set_finger_angle': -30}))
 
             # move over the origin card
@@ -1354,19 +2424,50 @@ class AsyncObserver:
                 current_action="Measuring spin",
             ))
             # there should be some swing when we get there. 
-            await self.half_auto_calibration()
+            if await self.half_auto_calibration() is False:
+                calibration_artifact.fail('half calibration failed before spin calibration')
+                self._write_calibration_artifact(calibration_artifact)
+                return False
 
             # roomspin
+            calibration_artifact.set_phase('spin_calibration')
             await self.calibrate_spin(reset_wrist_first=True) # already did that during diamond to save time
 
+            if isinstance(self.gripper_client, ArpeggioGripperClient) and self.gripper_client.connected:
+                self.send_ui(operation_progress=telemetry.OperationProgress(
+                    percent_complete=95.0,
+                    name="Calibration",
+                    current_action="Calibrating swing cancellation",
+                ))
+                calibration_artifact.set_phase('swing_cancellation_calibration')
+                swing_calibration_ok = await self.auto_calibrate_swing_cancellation()
+                calibration_artifact.record_optimizer_report(
+                    name='swing_cancellation',
+                    success=swing_calibration_ok is not False,
+                )
+
             # TODO "Calibration complete. Would you like stringman to pick up the cards and put them in the trash? yes/no"
+            completion_action = "Calibration completed. Sanity check anchor positions before moving. Cards can be removed from the floor. Parking location must be re-recorded."
+            if swing_calibration_ok is False:
+                completion_action = (
+                    "Calibration completed, but swing cancellation calibration failed. "
+                    "Leave swing cancellation disabled and rerun swingcal after checking logs."
+                )
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=100.0,
                 name="Calibration",
-                current_action="Calibration completed. Sanity check anchor positions before moving. Cards can be removed from the floor. Parking location must be re-recorded.",
+                current_action=completion_action,
             ))
+            self._write_calibration_artifact(
+                calibration_artifact,
+                status='completed',
+                message=completion_action,
+            )
+            return True
 
         except asyncio.CancelledError:
+            calibration_artifact.fail('cancelled by user')
+            self._write_calibration_artifact(calibration_artifact)
             if finger_task is not None:
                 finger_task.cancel()
                 await finger_task
@@ -1377,6 +2478,8 @@ class AsyncObserver:
             ))
             raise
         except Exception as e:
+            calibration_artifact.fail('calibration failed', exception=repr(e))
+            self._write_calibration_artifact(calibration_artifact)
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=100.0,
                 name="Calibration",
@@ -1395,52 +2498,53 @@ class AsyncObserver:
         # record the z rotation of the gantry card from the perspective of the gripper camera's stabilized frame
         # when the stabilization is done without any existing z rotation term
         self.gripper_client.calibrating_room_spin = True
-
-        if isinstance(self.gripper_client, ArpeggioGripperClient):
-            # measurement must be taken at the wrist's zero point
-            center_angle = 540
-            if reset_wrist_first:
-                asyncio.create_task(self.gripper_client.send_commands({'reset_wrist': None}))
-                await asyncio.sleep(10)
-            # wait till within 1 degree of target
-            actual_wrist = 100
-            end_time = time.time() + 2
-            logger.info(f'Moved wrist to {center_angle}, waiting to reach position')
-            while abs(actual_wrist - center_angle) > 2.0 and time.time() < end_time:
-                await asyncio.sleep(0.2)
-                actual_wrist = self.datastore.winch_line_record.getLast()[1]
-            logger.info(f'Actual wrist position = {actual_wrist}')
-
-        # detect origin card
         try:
-            await asyncio.sleep(0.1)
-            origin_card_pose = [None]
-            def special_handle_det(timestamp, detections):
-                for d in detections:
-                    if d['n'] == 'origin':
-                        # a pose of the origin card in the frame of reference of the stabilized gripper cam.
-                        origin_card_pose[0] = d['p']
-            end_time = time.time() + 10
-            logger.info('Collecting observations of origin card from gripper cam')
-            while origin_card_pose[0] is None and time.time() < end_time:
-                async_result = self.pool.apply_async(
-                    locate_markers_gripper,
-                    (self.gripper_client.last_frame_resized, self.config.camera_cal_wide),
-                    callback=partial(special_handle_det, time.time()))
-                detections = async_result.get(timeout=5)
-        except Exception as e:
-            logger.exception(e)
-            raise
-        if origin_card_pose[0] is None:
-            raise RuntimeError("Gripper camera was unable to make any observations of the origin card.")
-        
-        euler_rot = Rotation.from_rotvec(origin_card_pose[0][0]).as_euler('zyx')
-        logger.info(f'Euler rotation of origin card relative to stabilized gripper camera {euler_rot}')
-        roomspin = euler_rot[0]
-        self.config.gripper.frame_room_spin = roomspin
-        self.config.has_been_calibrated = True
-        save_config(self.config, self.config_path)
-        self.gripper_client.calibrating_room_spin = False
+            if isinstance(self.gripper_client, ArpeggioGripperClient):
+                # measurement must be taken at the wrist's zero point
+                center_angle = 540
+                if reset_wrist_first:
+                    asyncio.create_task(self.gripper_client.send_commands({'reset_wrist': None}))
+                    await asyncio.sleep(10)
+                # wait till within 1 degree of target
+                actual_wrist = 100
+                end_time = time.time() + 2
+                logger.info(f'Moved wrist to {center_angle}, waiting to reach position')
+                while abs(actual_wrist - center_angle) > 2.0 and time.time() < end_time:
+                    await asyncio.sleep(0.2)
+                    actual_wrist = self.datastore.winch_line_record.getLast()[1]
+                logger.info(f'Actual wrist position = {actual_wrist}')
+
+            # detect origin card
+            try:
+                await asyncio.sleep(0.1)
+                origin_card_pose = [None]
+                def special_handle_det(timestamp, detections):
+                    for d in detections:
+                        if d['n'] == 'origin':
+                            # a pose of the origin card in the frame of reference of the stabilized gripper cam.
+                            origin_card_pose[0] = d['p']
+                end_time = time.time() + 10
+                logger.info('Collecting observations of origin card from gripper cam')
+                while origin_card_pose[0] is None and time.time() < end_time:
+                    async_result = self.pool.apply_async(
+                        locate_markers_gripper,
+                        (self.gripper_client.last_frame_resized, self.config.camera_cal_wide),
+                        callback=partial(special_handle_det, time.time()))
+                    detections = async_result.get(timeout=5)
+            except Exception as e:
+                logger.exception(e)
+                raise
+            if origin_card_pose[0] is None:
+                raise RuntimeError("Gripper camera was unable to make any observations of the origin card.")
+
+            euler_rot = Rotation.from_rotvec(origin_card_pose[0][0]).as_euler('zyx')
+            logger.info(f'Euler rotation of origin card relative to stabilized gripper camera {euler_rot}')
+            roomspin = euler_rot[0]
+            self.config.gripper.frame_room_spin = roomspin
+            self.config.has_been_calibrated = True
+            save_config(self.config, self.config_path)
+        finally:
+            self.gripper_client.calibrating_room_spin = False
 
     async def horizontal_line_task(self):
         """
@@ -1900,28 +3004,36 @@ class AsyncObserver:
         # Add item to batch
         with self.telemetry_buffer_lock:
             self.telemetry_buffer.append(item)
+            OBS.set_telemetry_buffer(len(self.telemetry_buffer))
+        OBS.record_telemetry_item(key)
+        OBS.record_telemetry_payload(key, msg)
 
     async def flush_tele_buffer(self):
         """
         Flush the teloperation buffer. sending all data to all UI clients.
         Normally called within position estimator's 60hz loop
         """
+        started = time.time()
         with self.telemetry_buffer_lock:
             batch = telemetry.TelemetryBatchUpdate(
                 robot_id=self.config.robot_id,
                 updates=list(self.telemetry_buffer)
             )
             self.telemetry_buffer.clear()
+            OBS.set_telemetry_buffer(0)
         to_send = bytes(batch)
         # copy list to prevent RuntimeError: Set changed size during iteration
         connected_clients = self.connected_local_clients.copy()
         if self.cloud_telem_websocket:
             connected_clients.add(self.cloud_telem_websocket) # will only be connected when self.telemetry_env is not None
-        for ui_websocket in connected_clients:
-            try:
-                r = await ui_websocket.send(to_send)
-            except (ConnectionClosedOK, ConnectionClosedError) as e:
-                pass # stale connection
+        recipients = len(connected_clients)
+        with OBS.span("observer.flush_telemetry", bytes=len(to_send), recipients=recipients):
+            for ui_websocket in connected_clients:
+                try:
+                    r = await ui_websocket.send(to_send)
+                except (ConnectionClosedOK, ConnectionClosedError) as e:
+                    pass # stale connection
+        OBS.record_telemetry_flush(bytes_sent=len(to_send), recipients=recipients, duration=time.time() - started)
 
     async def start_pe_when_ready(self):
         await self.any_anchor_connected.wait()
@@ -1935,6 +3047,7 @@ class AsyncObserver:
         monitor.start()
 
         self.passive_safety_task = asyncio.create_task(self.passive_safety())
+        self.observability_task = asyncio.create_task(self.update_observability_runtime())
 
         if self.telemetry_env is not None:
             self.cloud_telem = asyncio.create_task(self.connect_cloud_telemetry())
@@ -1947,7 +3060,7 @@ class AsyncObserver:
         self.pe_task = asyncio.create_task(self.start_pe_when_ready())
 
         # main process must own pool, and there's only one. multiple subprocesses may submit work.
-        with Pool(processes=3) as pool:
+        with Pool(processes=3, initializer=configure_worker_process) as pool:
             self.pool = pool
 
             # zeroconf only discovers services and keeps their addresses and ports up to date in the config.
@@ -2034,6 +3147,9 @@ class AsyncObserver:
         if self.passive_safety_task is not None:
             self.passive_safety_task.cancel()
             tasks.append(self.passive_safety_task)
+        if self.observability_task is not None:
+            self.observability_task.cancel()
+            tasks.append(self.observability_task)
 
         tasks.extend([client.shutdown() for client in self.bot_clients.values()])
         try:
@@ -2242,7 +3358,15 @@ class AsyncObserver:
                 # we consider the lower line number to be the direct line
                 asyncio.create_task(self.anchors[line_no//2].send_commands({command: (speed, spool_no)}))
 
-    async def move_direction_speed(self, uvec, speed=None, starting_pos=None, downward_bias=-0.04, key='default'):
+    async def move_direction_speed(
+        self,
+        uvec,
+        speed=None,
+        starting_pos=None,
+        downward_bias=-0.04,
+        key='default',
+        record_retry=True,
+    ):
         """Move in the direction of the given unit vector at the given speed.
         Any move must be based on some assumed starting position. if none is provided,
         we will use the last one sent from position_estimator
@@ -2320,6 +3444,9 @@ class AsyncObserver:
         if not self.pe.point_inside_work_area(new_pos):
             speed = 0
             total_velocity = np.zeros(3)
+
+        if record_retry:
+            self._record_retryable_move(key, total_velocity)
             
         lengths_b = np.linalg.norm(new_pos - self.pe.anchor_points, axis=1)
         deltas = lengths_b - lengths_a
@@ -2431,6 +3558,7 @@ class AsyncObserver:
 
         if self.run_ai:
             import torch
+            configure_native_thread_pools(configure_torch=True)
             from huggingface_hub import hf_hub_download
             DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
             from nf_robot.ml.target_heatmap import TargetHeatmapNet, extract_targets_from_heatmap, HM_IMAGE_RES
@@ -3020,14 +4148,38 @@ def main():
     parser.add_argument("--local_models", action="store_true", help="Use local models from models/ rather than downloading the production models from huggingface")
     parser.add_argument("--arp_grasp", action="store_true", help="Use arp_execute_grasp (centering net) instead of act_execute_grasp (ACT policy) for the Arpeggio gripper")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG level logging")
+    parser.add_argument("--observability-debug", action="store_true", help="Record bounded telemetry payload summaries at DEBUG level in observability logs")
+    parser.add_argument("--no_observability", action="store_true", help="Disable local Prometheus metrics, OTel traces, and JSON observability logs")
+    parser.add_argument("--metrics-host", default=os.environ.get("NF_PROMETHEUS_HOST", "0.0.0.0"), help="Prometheus metrics bind host")
+    parser.add_argument("--metrics-port", type=int, default=int(os.environ.get("NF_PROMETHEUS_PORT", "9464")), help="Prometheus metrics port")
+    parser.add_argument("--observability-log", default=os.environ.get("NF_OBSERVABILITY_LOG", "logs/nf_robot-observability.jsonl"), help="JSON log path scraped by Promtail")
     args = parser.parse_args()
+
+    if args.no_observability:
+        os.environ["NF_OBSERVABILITY_ENABLED"] = "0"
+    if args.observability_debug:
+        os.environ["NF_OBSERVABILITY_DEBUG"] = "1"
 
     if args.debug:
         logging.basicConfig(level=logging.WARNING, format='%(levelname)s %(name)s %(message)s')
         logging.getLogger('nf_robot').setLevel(logging.DEBUG)
 
     async def run_async():
-        runner = AsyncObserver(False, args.config, telemetry_env=args.telemetry_env, run_ai=(not args.no_ai), run_ortho=(not args.no_ortho), auto_start=args.auto_start, local_models=args.local_models, use_arp_grasp=args.arp_grasp, debug=args.debug)
+        runner = AsyncObserver(
+            False,
+            args.config,
+            telemetry_env=args.telemetry_env,
+            run_ai=(not args.no_ai),
+            run_ortho=(not args.no_ortho),
+            auto_start=args.auto_start,
+            local_models=args.local_models,
+            use_arp_grasp=args.arp_grasp,
+            debug=args.debug,
+            observability_debug=args.observability_debug,
+            observability_metrics_host=args.metrics_host,
+            observability_metrics_port=args.metrics_port,
+            observability_log_path=args.observability_log,
+        )
 
         # Idempotent stop trigger
         def stop():

@@ -1,9 +1,20 @@
 import numpy as np
 from pathlib import Path
 import uuid
+import json
 from nf_robot.generated.nf import common, config as nf_config
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / 'configuration.json'
+DEFAULT_SWING_LATENCY = 0.18
+DEFAULT_SWING_GAIN = 0.02
+DEFAULT_SWING_SIGN = -1.0
+DEFAULT_SWING_MAX_VELOCITY = 0.03
+DEFAULT_SWING_AUTO_MIN_ENERGY = 1e-2
+DEFAULT_SWING_AUTO_ABORT_RATIO = 1.2
+MIN_SWING_GAIN = 0.0
+MAX_SWING_GAIN = 0.02
+MIN_SWING_MAX_VELOCITY = 0.0
+MAX_SWING_MAX_VELOCITY = 0.03
 
 # Anchors
 # Defaults based on a square room setup, pointing towards center.
@@ -109,9 +120,53 @@ def create_default_config() -> nf_config.StringmanPilotConfig:
     config.running_ws_delay = 0.03
 
     # Swing cancellation
-    config.swing_latency = 0.18 # seconds
+    config.swing_latency = DEFAULT_SWING_LATENCY # seconds
+    config.swing_gain = DEFAULT_SWING_GAIN
+    config.swing_sign = DEFAULT_SWING_SIGN
+    config.swing_max_velocity = DEFAULT_SWING_MAX_VELOCITY
+    config.swing_auto_min_energy = DEFAULT_SWING_AUTO_MIN_ENERGY
+    config.swing_auto_abort_ratio = DEFAULT_SWING_AUTO_ABORT_RATIO
 
     return config
+
+def _raw_config_has(raw_config: dict | None, camel_name: str, snake_name: str) -> bool:
+    if raw_config is None:
+        return False
+    return camel_name in raw_config or snake_name in raw_config
+
+def normalize_config_defaults(config: nf_config.StringmanPilotConfig, raw_config: dict | None=None):
+    """
+    Fill defaults for fields introduced after older config files were written.
+
+    Proto3 scalar fields deserialize to zero when absent, so use the raw JSON
+    keys to avoid overwriting a deliberately saved zero latency.
+    """
+    if not _raw_config_has(raw_config, 'swingLatency', 'swing_latency'):
+        config.swing_latency = DEFAULT_SWING_LATENCY
+    if not np.isfinite(config.swing_latency) or config.swing_latency < 0.0 or config.swing_latency > 0.8:
+        config.swing_latency = DEFAULT_SWING_LATENCY
+    if not _raw_config_has(raw_config, 'swingGain', 'swing_gain'):
+        config.swing_gain = DEFAULT_SWING_GAIN
+    if not np.isfinite(config.swing_gain):
+        config.swing_gain = DEFAULT_SWING_GAIN
+    config.swing_gain = float(np.clip(abs(config.swing_gain), MIN_SWING_GAIN, MAX_SWING_GAIN))
+    if not _raw_config_has(raw_config, 'swingSign', 'swing_sign'):
+        config.swing_sign = DEFAULT_SWING_SIGN
+    if config.swing_sign not in (-1.0, 1.0):
+        config.swing_sign = DEFAULT_SWING_SIGN if config.swing_sign == 0 else float(np.sign(config.swing_sign))
+    if not _raw_config_has(raw_config, 'swingMaxVelocity', 'swing_max_velocity'):
+        config.swing_max_velocity = DEFAULT_SWING_MAX_VELOCITY
+    if not np.isfinite(config.swing_max_velocity):
+        config.swing_max_velocity = DEFAULT_SWING_MAX_VELOCITY
+    config.swing_max_velocity = float(np.clip(abs(config.swing_max_velocity), MIN_SWING_MAX_VELOCITY, MAX_SWING_MAX_VELOCITY))
+    if not _raw_config_has(raw_config, 'swingAutoMinEnergy', 'swing_auto_min_energy'):
+        config.swing_auto_min_energy = DEFAULT_SWING_AUTO_MIN_ENERGY
+    if config.swing_auto_min_energy < DEFAULT_SWING_AUTO_MIN_ENERGY:
+        config.swing_auto_min_energy = DEFAULT_SWING_AUTO_MIN_ENERGY
+    if not _raw_config_has(raw_config, 'swingAutoAbortRatio', 'swing_auto_abort_ratio'):
+        config.swing_auto_abort_ratio = DEFAULT_SWING_AUTO_ABORT_RATIO
+    if config.swing_auto_abort_ratio <= 1.0:
+        config.swing_auto_abort_ratio = DEFAULT_SWING_AUTO_ABORT_RATIO
 
 def save_config(config: nf_config.StringmanPilotConfig, path: Path=DEFAULT_CONFIG_PATH):
     """
@@ -131,7 +186,9 @@ def load_config(path: Path=DEFAULT_CONFIG_PATH) -> nf_config.StringmanPilotConfi
             raise FileNotFoundError # observer unit test path
         with open(path, 'r') as f:
             print(f'Loaded config from {path}')
-            c = nf_config.StringmanPilotConfig().from_json(f.read())
+            raw_text = f.read()
+            raw_config = json.loads(raw_text)
+            c = nf_config.StringmanPilotConfig().from_json(raw_text)
             if c.camera_cal is None or c.camera_cal_wide is None:
                 default = create_default_config()
                 if c.camera_cal is None:
@@ -150,6 +207,7 @@ def load_config(path: Path=DEFAULT_CONFIG_PATH) -> nf_config.StringmanPilotConfi
                 for anchor in c.anchors:
                     if anchor.indirect_line.cam_tilt is None:
                         anchor.indirect_line.cam_tilt = 26.0
+            normalize_config_defaults(c, raw_config)
 
             return c
 

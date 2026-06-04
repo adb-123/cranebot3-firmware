@@ -11,6 +11,8 @@ import io
 import cv2
 from urllib.parse import urlparse
 
+from nf_robot.observability import OBS
+
 logger = logging.getLogger(__name__)
 
 class StreamingHandler(BaseHTTPRequestHandler):
@@ -58,27 +60,32 @@ class StreamingHandler(BaseHTTPRequestHandler):
             streamer = self.server.streamer
             with streamer._client_lock:
                 streamer.client_count += 1
+                OBS.set_video_clients(streamer.port, streamer.client_count)
             try:
                 # Loop to send frames to the client
-                while True:
-                    # Wait for a new frame from the streamer
-                    with streamer.frame_condition:
-                        streamer.frame_condition.wait()
-                        frame = streamer.latest_frame
+                with OBS.span("video.mjpeg.client", port=streamer.port):
+                    while not streamer._stopping:
+                        # Wait for a new frame from the streamer
+                        with streamer.frame_condition:
+                            streamer.frame_condition.wait(timeout=1.0)
+                            if streamer._stopping:
+                                break
+                            frame = streamer.latest_frame
 
-                    if frame:
-                        self.wfile.write(b'--frame\r\n')
-                        self.send_header('Content-Type', 'image/jpeg')
-                        self.send_header('Content-Length', str(len(frame)))
-                        self.end_headers()
-                        self.wfile.write(frame)
-                        self.wfile.write(b'\r\n')
+                        if frame:
+                            self.wfile.write(b'--frame\r\n')
+                            self.send_header('Content-Type', 'image/jpeg')
+                            self.send_header('Content-Length', str(len(frame)))
+                            self.end_headers()
+                            self.wfile.write(frame)
+                            self.wfile.write(b'\r\n')
             except Exception:
                 # Client disconnected
                 pass
             finally:
                 with streamer._client_lock:
                     streamer.client_count -= 1
+                    OBS.set_video_clients(streamer.port, streamer.client_count)
         else:
             self.send_error(404)
 
@@ -102,41 +109,59 @@ class MjpegStreamer:
         self.frame_condition = threading.Condition()
         self.client_count = 0
         self._client_lock = threading.Lock()
+        self._stopping = False
+        self._server_thread = None
         atexit.register(self.stop)
 
     def start(self):
+        if self.http_server is not None:
+            return
+        self._stopping = False
         self.http_server = ThreadingHTTPServer(('0.0.0.0', self.port), StreamingHandler)
         # Inject self into server so handler can access frame buffer
         self.http_server.streamer = self
         
-        thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
-        thread.start()
+        self._server_thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
+        self._server_thread.start()
 
     def send_frame(self, frame):
         """
         Encodes the frame as JPEG and notifies waiting HTTP clients.
         Expects BGR frame (standard OpenCV format).
         """
+        if self._stopping:
+            return
+
         with self._client_lock:
             if self.client_count == 0:
                 return
 
         # Encode frame to JPEG directly in memory
+        started = time.time()
         success, buffer = cv2.imencode('.jpg', frame) #, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
 
         if success:
+            data = buffer.tobytes()
+            OBS.record_video_encode(self.port, len(data), time.time() - started)
             with self.frame_condition:
-                self.latest_frame = buffer.tobytes()
+                self.latest_frame = data
                 self.frame_condition.notify_all()
         else:
             logger.warning("Failed to encode frame to JPEG")
 
     def stop(self):
+        self._stopping = True
+        with self.frame_condition:
+            self.frame_condition.notify_all()
+
         h = self.http_server
         if h is not None:
             h.shutdown()
             h.server_close()
             self.http_server = None
+        if self._server_thread is not None and self._server_thread is not threading.current_thread():
+            self._server_thread.join(timeout=2.0)
+        self._server_thread = None
 
 class RTMPStreamer:
     """
@@ -265,6 +290,8 @@ class NfVideoStreamer:
 
         self._remote = RTMPStreamer(width=width, height=height, fps=fps, rtmp_url=rtmp) if rtmp else None
         self._frames_before_ready = 2 if rtmp is None else 20
+        self._started = False
+        self._stopped = False
 
     @property
     def local_uri(self):
@@ -275,12 +302,20 @@ class NfVideoStreamer:
         return self._stream_path
 
     def start(self):
-        self._local.start()
-        if self._remote:
-            self._remote.start()
+        if self._started and not self._stopped:
+            return
+        self._started = True
+        self._stopped = False
+        with OBS.span("video.streamer.start", stream_path=self._stream_path, local_uri=self._local_uri):
+            self._local.start()
+            if self._remote:
+                self._remote.start()
         logger.info(f'Streaming locally at {self._local_uri}')
 
     def send_frame(self, frame):
+        if self._stopped:
+            return
+        OBS.record_video_frame()
         self._local.send_frame(frame)
         if self._remote:
             self._remote.send_frame(frame)
@@ -291,6 +326,9 @@ class NfVideoStreamer:
                 self._on_ready(self._local_uri, self._stream_path)
 
     def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
         self._local.stop()
         if self._remote:
             self._remote.stop()

@@ -17,6 +17,7 @@ import asyncio
 import websockets
 import json
 import time
+import socket
 
 # damiao_motor is hardware-only; stub the whole module before local imports resolve it.
 sys.modules.setdefault('damiao_motor', MagicMock())
@@ -25,6 +26,12 @@ from nf_robot.robot.anchor_arp_server import AnchorArpServer
 
 
 class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
+
+    @staticmethod
+    def free_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
 
     async def asyncSetUp(self):
         self.run_loop = True
@@ -55,9 +62,11 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
             spool.trackingLoop = mock_tracking_loop
             spool.popMeasurements.return_value = []
             spool.last_tension = 0.0
+            spool.last_length = 3.0
 
         self.server = AnchorArpServer(power=False)
-        self.server_task = asyncio.create_task(self.server.main())
+        self.port = self.free_port()
+        self.server_task = asyncio.create_task(self.server.main(port=self.port))
         await asyncio.sleep(0.1)  # let server start up
 
     async def asyncTearDown(self):
@@ -71,7 +80,7 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
 
     async def send_command(self, command, sleep=0.1):
         """Open a websocket, send one command dict, wait, close."""
-        async with websockets.connect("ws://127.0.0.1:8765") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{self.port}") as ws:
             await ws.send(json.dumps(command))
             await asyncio.sleep(sleep)
             self.assertFalse(self.server_task.done(), "Server crashed after command")
@@ -90,7 +99,7 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
         import nf_robot.common.definitions as defs
 
         # Run a second server with power=True on a different port to avoid
-        # colliding with the already-bound self.server on 8765.
+        # colliding with the already-bound self.server.
         loop2_state = {'running': True}
         def tracking_loop2():
             while loop2_state['running']:
@@ -104,7 +113,7 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
         self.mock_spool_class.side_effect = spools2
 
         server2 = AnchorArpServer(power=True)
-        server2_task = asyncio.create_task(server2.main(port=8766))
+        server2_task = asyncio.create_task(server2.main(port=self.free_port()))
         await asyncio.sleep(0.1)
 
         # Extract the full_diameter keyword from the first call (spool 0 = power spool)
@@ -123,7 +132,7 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_imu_enables_motors_and_resumes_spools(self):
         """Every motor is enabled and every spool resumes when a client connects."""
-        async with websockets.connect("ws://127.0.0.1:8765") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{self.port}") as ws:
             await asyncio.sleep(0.1)
             for motor in self.server.motors:
                 motor.enable.assert_called()
@@ -214,7 +223,7 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
         spool = self.mock_spools[0]
         spool.last_tension = 0.0  # slack
 
-        async with websockets.connect("ws://127.0.0.1:8765") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{self.port}") as ws:
             await ws.send(json.dumps({'tighten': 0}))
             await asyncio.sleep(0.1)
 
@@ -286,6 +295,38 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
         # Last call must be setAimSpeed(0) — the motor is stopped on failure.
         self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
 
+    async def test_tighten_timeout_stops_and_reports_failure(self):
+        """A line that never reaches tension times out instead of reeling forever."""
+        spool = self.mock_spools[0]
+        spool.last_tension = 0.0
+        spool.last_length = 3.0
+        self.server.conf['TIGHTEN_MAX_RETRIES'] = 1
+        self.server.conf['TIGHTEN_ATTEMPT_TIMEOUT_S'] = 0.12
+        self.server.conf['LINE_ACTION_STALE_TIMEOUT_S'] = 1.0
+
+        result = await self.server.tighten(0)
+
+        self.assertFalse(result)
+        self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
+        self.assertEqual(self.server.line_action_states[0]['status'], 'failed')
+        self.assertEqual(self.server.line_action_states[0]['reason'], 'tension_timeout')
+
+    async def test_tighten_stale_line_state_stops_and_reports_failure(self):
+        """No length or tension movement while commanded is reported as stale/stuck."""
+        spool = self.mock_spools[1]
+        spool.last_tension = 0.0
+        spool.last_length = 3.0
+        self.server.conf['TIGHTEN_MAX_RETRIES'] = 1
+        self.server.conf['TIGHTEN_ATTEMPT_TIMEOUT_S'] = 1.0
+        self.server.conf['LINE_ACTION_STALE_TIMEOUT_S'] = 0.12
+
+        result = await self.server.tighten(1)
+
+        self.assertFalse(result)
+        self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
+        self.assertEqual(self.server.line_action_states[1]['status'], 'failed')
+        self.assertEqual(self.server.line_action_states[1]['reason'], 'line_state_stale')
+
     # ------------------------------------------------------------------ stow
 
     async def test_stow_invalid_spool_is_noop(self):
@@ -323,6 +364,24 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
         spool.pauseTrackingLoop.assert_called_once()
         motor.disable.assert_called_once()
 
+    async def test_stow_timeout_stops_without_disabling_motor(self):
+        """Failed stow stops line motion and does not disable the motor for storage."""
+        spool = self.mock_spools[1]
+        motor = self.server.motors[1]
+        spool.last_tension = 0.0
+        spool.last_length = 3.0
+        self.server.conf['STOW_TIMEOUT_S'] = 0.12
+        self.server.conf['LINE_ACTION_STALE_TIMEOUT_S'] = 1.0
+
+        result = await self.server.stow(1)
+
+        self.assertFalse(result)
+        self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
+        spool.pauseTrackingLoop.assert_not_called()
+        motor.disable.assert_not_called()
+        self.assertEqual(self.server.line_action_states[1]['status'], 'failed')
+        self.assertEqual(self.server.line_action_states[1]['reason'], 'tension_timeout')
+
     async def test_stow_dispatched_from_command(self):
         """The 'stow' key in an incoming message is dispatched to stow()."""
         spool = self.mock_spools[0]
@@ -333,11 +392,76 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
         spool.pauseTrackingLoop.assert_called()
         self.server.motors[0].disable.assert_called()
 
+    # ------------------------------------------------------------------ relax
+
+    async def test_relax_invalid_spool_is_noop(self):
+        """relax() with spool_no outside (0, 1) returns without touching spools."""
+        result = await self.server.relax(3)
+        self.assertFalse(result)
+        self.mock_spools[0].setAimSpeed.assert_not_called()
+        self.mock_spools[1].setAimSpeed.assert_not_called()
+
+    async def test_relax_unwinds_for_bounded_duration_then_stops(self):
+        """relax() actually lets line out and stops after the configured limit."""
+        spool = self.mock_spools[0]
+        spool.last_length = 3.0
+        spool.last_tension = 2.0
+        self.server.conf['RELAX_SPEED'] = 0.04
+        self.server.conf['RELAX_DURATION_S'] = 0.12
+        self.server.conf['RELAX_DISTANCE_M'] = 10.0
+        self.server.conf['LINE_ACTION_STALE_TIMEOUT_S'] = 1.0
+
+        result = await self.server.relax(0)
+
+        self.assertTrue(result)
+        speeds = [call.args[0] for call in spool.setAimSpeed.call_args_list]
+        self.assertIn(0.04, speeds)
+        self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
+        self.assertEqual(self.server.line_action_states[0]['status'], 'succeeded')
+        self.assertEqual(self.server.line_action_states[0]['reason'], 'duration_elapsed')
+
+    async def test_relax_stops_when_distance_reached(self):
+        """relax() stops early once the observed released length crosses the limit."""
+        spool = self.mock_spools[1]
+        spool.last_length = 3.0
+        spool.last_tension = 2.0
+        self.server.conf['RELAX_SPEED'] = 0.04
+        self.server.conf['RELAX_DURATION_S'] = 1.0
+        self.server.conf['RELAX_DISTANCE_M'] = 0.05
+        self.server.conf['LINE_ACTION_STALE_TIMEOUT_S'] = 1.0
+
+        relax_task = asyncio.create_task(self.server.relax(1))
+        await asyncio.sleep(0.08)
+        spool.last_length = 3.06
+        result = await asyncio.wait_for(relax_task, timeout=1.0)
+
+        self.assertTrue(result)
+        self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
+        self.assertEqual(self.server.line_action_states[1]['status'], 'succeeded')
+        self.assertEqual(self.server.line_action_states[1]['reason'], 'distance_reached')
+
+    async def test_relax_stale_line_state_reports_failure(self):
+        """relax() fails when commanded unwinding produces no line-state movement."""
+        spool = self.mock_spools[0]
+        spool.last_length = 3.0
+        spool.last_tension = 2.0
+        self.server.conf['RELAX_SPEED'] = 0.04
+        self.server.conf['RELAX_DURATION_S'] = 1.0
+        self.server.conf['RELAX_DISTANCE_M'] = 0.05
+        self.server.conf['LINE_ACTION_STALE_TIMEOUT_S'] = 0.12
+
+        result = await self.server.relax(0)
+
+        self.assertFalse(result)
+        self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
+        self.assertEqual(self.server.line_action_states[0]['status'], 'failed')
+        self.assertEqual(self.server.line_action_states[0]['reason'], 'line_state_stale')
+
     # ------------------------------------------------------------------ identify
 
     async def test_identify_pauses_loop_jogs_motor_then_resumes(self):
         """identify() pauses the tracking loop, drives the motor, then resumes it."""
-        async with websockets.connect("ws://127.0.0.1:8765") as ws:
+        async with websockets.connect(f"ws://127.0.0.1:{self.port}") as ws:
             await ws.send(json.dumps({'identify': None}))
             await asyncio.sleep(0.3)  # identify runs ~0.1 s of real time.sleep calls
 

@@ -218,6 +218,50 @@ def calibrate_from_stream(address, config_file):
 
 W_ORIGIN = 0.1 # increase this to to make origin errors more expensive
 W_PLANAR = 1 # increase this to make anchor height deviations from the average plane more expensive
+ROBUST_LOSS = 'soft_l1'
+ROBUST_F_SCALE = 0.1
+
+def _normalized_residual_group(values, count=None):
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return arr.flatten()
+    if count is None:
+        count = arr.shape[0] if arr.ndim > 1 else arr.size
+    if count > 1:
+        arr = arr / np.sqrt(count)
+    return arr.flatten()
+
+def _log_solver_result(name, result):
+    try:
+        residuals = np.asarray(getattr(result, 'fun', []), dtype=float)
+    except (TypeError, ValueError):
+        residuals = np.array([], dtype=float)
+    if residuals.size:
+        rms = float(np.sqrt(np.mean(residuals**2)))
+        max_abs = float(np.max(np.abs(residuals)))
+    else:
+        rms = 0.0
+        max_abs = 0.0
+    try:
+        cost = float(getattr(result, 'cost', np.nan))
+    except (TypeError, ValueError):
+        cost = np.nan
+    try:
+        optimality = float(getattr(result, 'optimality', np.nan))
+    except (TypeError, ValueError):
+        optimality = np.nan
+    logger.info(
+        "%s solver status: success=%s status=%s cost=%.6f nfev=%s optimality=%.6f "
+        "residual_rms=%.6f residual_max=%.6f",
+        name,
+        getattr(result, 'success', None),
+        getattr(result, 'status', None),
+        cost,
+        getattr(result, 'nfev', None),
+        optimality,
+        rms,
+        max_abs,
+    )
 
 def multi_card_residuals(x, averages):
     """
@@ -265,8 +309,11 @@ def multi_card_residuals(x, averages):
             # Residual = Position_Calculated - [0,0,0]
             # We add 3 residuals (dx, dy, dz) per sighting
             
-            current_residuals = (projected_positions - np.zeros(3)) * W_ORIGIN
-            residuals.extend(current_residuals.flatten())
+            current_residuals = _normalized_residual_group(
+                (projected_positions - np.zeros(3)) * W_ORIGIN,
+                len(projected_positions),
+            )
+            residuals.extend(current_residuals)
             
         elif len(projected_positions) > 1:
             # constraint 2: Consistency
@@ -279,21 +326,17 @@ def multi_card_residuals(x, averages):
             centroid = np.mean(projected_positions, axis=0)
             
             # The error is the distance of each sighting from that shared centroid
-            current_residuals = projected_positions - centroid
-            residuals.extend(current_residuals.flatten())
+            current_residuals = _normalized_residual_group(
+                projected_positions - centroid,
+                len(projected_positions),
+            )
+            residuals.extend(current_residuals)
 
-
-        # constrain anchors to a flat plane in the z axis.
-        if True:
-            # Extract Z coordinates from all 4 anchors
-            anchor_zs = anchor_poses[:, 1, 2]
-            
-            # Calculate the average Z plane
-            avg_z = np.mean(anchor_zs)
-            
-            # Penalize deviation from the average plane
-            z_residuals = (anchor_zs - avg_z) * W_PLANAR
-            residuals.extend(z_residuals)
+    # Constrain anchors to one flat z plane exactly once per residual evaluation.
+    anchor_zs = anchor_poses[:, 1, 2]
+    avg_z = np.mean(anchor_zs)
+    z_residuals = (anchor_zs - avg_z) * W_PLANAR
+    residuals.extend(z_residuals)
 
     return np.array(residuals)
 
@@ -326,16 +369,17 @@ def optimize_anchor_poses(averages):
         initial_guesses.append(guess)
     logger.debug(f'initial_guesses = {initial_guesses}')
 
-    # 'lm' (Levenberg-Marquardt) is standard for unconstrained least squares
     logger.info('Running least squares optimization')
     result = optimize.least_squares(
         multi_card_residuals,
         np.array(initial_guesses).flatten(),
         args=(averages,),
-        method='lm', 
-        # max_nfev=1000,
+        method='trf',
+        loss=ROBUST_LOSS,
+        f_scale=ROBUST_F_SCALE,
         verbose=0
     )
+    _log_solver_result('anchor calibration', result)
 
     if not result.success:
         logging.error(f"Optimization failed. Status: {result.status}, Msg: {result.message}")

@@ -366,10 +366,75 @@ class Positioner2:
         self.work_area = anchor_2d[np.argsort(angles)].astype(np.float32)
 
     def point_inside_work_area_2d(self, point):
-        return True 
+        area = self._normalized_work_area()
+        if area is None:
+            return True
+
+        point_xy = self._point_xy(point)
+        if point_xy is None:
+            return False
+
+        area_type, area_xy = area
+        if area_type == 'invalid':
+            return False
+
+        if area_type == 'rectangle':
+            min_xy = np.min(area_xy, axis=0)
+            max_xy = np.max(area_xy, axis=0)
+            return bool(np.all(point_xy >= min_xy - 1e-9) and np.all(point_xy <= max_xy + 1e-9))
+
+        contour = area_xy.astype(np.float32)
+        return bool(cv2.pointPolygonTest(contour, (float(point_xy[0]), float(point_xy[1])), False) >= 0)
 
     def point_inside_work_area(self, point):
-        return True 
+        return self.point_inside_work_area_2d(point)
+
+    def _normalized_work_area(self):
+        if self.work_area is None:
+            return None
+
+        try:
+            area = np.asarray(self.work_area, dtype=float)
+        except (TypeError, ValueError):
+            return ('invalid', None)
+
+        if area.size == 0:
+            return None
+
+        if area.ndim == 1:
+            if area.size == 4 and np.all(np.isfinite(area)):
+                return ('rectangle', area.reshape(2, 2))
+            return ('invalid', None)
+
+        if area.ndim == 3 and area.shape[1] == 1:
+            area = area[:, 0, :]
+
+        if area.ndim != 2 or area.shape[1] < 2:
+            return ('invalid', None)
+
+        area_xy = area[:, :2]
+        if not np.all(np.isfinite(area_xy)):
+            return ('invalid', None)
+
+        if len(area_xy) == 2:
+            return ('rectangle', area_xy)
+        if len(area_xy) >= 3:
+            return ('polygon', area_xy)
+        return ('invalid', None)
+
+    def _point_xy(self, point):
+        try:
+            point_array = np.asarray(point, dtype=float).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+
+        if point_array.size < 2:
+            return None
+
+        point_xy = point_array[:2]
+        if not np.all(np.isfinite(point_xy)):
+            return None
+        return point_xy
 
     async def check_and_recal(self):
         """

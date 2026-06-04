@@ -266,6 +266,37 @@ class StringmanPilotConfig(betterproto2.Message):
     seems to depend on the machine you run the motion controller on.
     """
 
+    swing_gain: "float" = betterproto2.field(14, betterproto2.TYPE_FLOAT)
+    """
+    Positive scalar used by swing cancellation. The sign is stored separately
+    so calibration can test phase/sign without hiding it in a signed gain.
+    """
+
+    swing_sign: "float" = betterproto2.field(15, betterproto2.TYPE_FLOAT)
+    """
+    Either -1 or 1. A wrong sign/phase turns damping into swing amplification.
+    """
+
+    swing_max_velocity: "float" = betterproto2.field(16, betterproto2.TYPE_FLOAT)
+    """
+    Maximum XY correction velocity in meters per second from swing cancellation.
+    """
+
+    swing_auto_min_energy: "float" = betterproto2.field(
+        17, betterproto2.TYPE_FLOAT
+    )
+    """
+    Minimum swing model energy required before automatic calibration will run.
+    """
+
+    swing_auto_abort_ratio: "float" = betterproto2.field(
+        18, betterproto2.TYPE_FLOAT
+    )
+    """
+    Abort a calibration trial when its swing energy grows past this ratio
+    relative to the pre-trial baseline.
+    """
+
 
 default_message_pool.register_message(
     "nf.config", "StringmanPilotConfig", StringmanPilotConfig

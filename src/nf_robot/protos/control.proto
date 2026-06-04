@@ -16,6 +16,8 @@ enum Command {
   COMMAND_HALF_CAL = 1;
   // Perform full calibration sequence. (requires setup of cards on the floor)
   COMMAND_FULL_CAL = 2;
+  // Auto-calibrate swing cancellation latency, sign, and gain.
+  COMMAND_AUTO_CALIBRATE_SWING = 19;
   // Zero the winch line in the gripper by reeling it in until it hits the limit switch
   COMMAND_ZERO_WINCH = 3;
   // Stop all spool motion (while respecting deceleration limits)
@@ -166,6 +168,8 @@ enum ComponentAction {
   COMPONENTACTION_RELAX = 4;
   // Set the angle from horizontal of the camera adapter on Arpeggio anchors.
   COMPONENTACTION_SET_CAM_ANGLE = 5;
+  // Reel the selected Arpeggio line in until tight, then disable motor torque for storage.
+  COMPONENTACTION_STOW = 6;
 }
 
 message SingleComponentAction {

@@ -13,6 +13,11 @@ import nf_robot.common.definitions as model_constants
 from nf_robot.common.util import *
 from nf_robot.generated.nf import telemetry, common
 from nf_robot.common.cv_common import SF_TARGET_SHAPE, stabilize_frame_2
+from nf_robot.common.config_loader import (
+    DEFAULT_SWING_GAIN,
+    DEFAULT_SWING_MAX_VELOCITY,
+    DEFAULT_SWING_SIGN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +45,7 @@ R_imu_to_cam = np.array([
 # omega is the constant angular frequency of the pendulum. Effectuve length from pivot to center of gripper mass is 0.4526 meters
 LENGTH = 0.4526
 OMEGA = np.sqrt(9.81 / LENGTH)
-SWING_CANCEL_GAIN = -0.12
+SWING_CANCEL_GAIN = -DEFAULT_SWING_GAIN
 CENTERING_GAIN = 0.4
 
 def rotate_vector(vec, rad):
@@ -65,6 +70,8 @@ class ArpeggioGripperClient(ComponentClient):
         self.park_pose_relative_to_camera = None
         self.gripper_swing_model = np.zeros((2,2))
         self.swing_model_ts = time.time()
+        self.swing_model_host_ts = 0.0
+        self.swing_model_remote_ts = None
         self.finger_contact_calibration_complete = asyncio.Event()
         
         # State variables added to track and prevent platform drift
@@ -79,10 +86,16 @@ class ArpeggioGripperClient(ComponentClient):
 
     async def handle_update_from_ws(self, update):
         if 'st' in update:
-            self.swing_model_ts = float(update['st'])
+            self.swing_model_remote_ts = float(update['st'])
 
         if 'sm' in update:
             self.gripper_swing_model = np.array(update['sm'])
+            # Use host receipt time for phase projection. The Pi's st is useful
+            # for diagnostics but not for closed-loop phase math because the two
+            # machines' wall clocks can differ or step independently.
+            swing_update_host_ts = time.time()
+            self.swing_model_host_ts = swing_update_host_ts
+            self.swing_model_ts = swing_update_host_ts
             
         if 'grip_sensors' in update:
             gs = update['grip_sensors']
@@ -134,45 +147,109 @@ class ArpeggioGripperClient(ComponentClient):
         if 'finger_contact_calibration_complete' in update:
             self.finger_contact_calibration_complete.set()
 
-    def compute_swing_correction(self, future_time):
-        """Compute a corrective velocity to be applied at a future time in order to cancel the swing"""
+    def reset_swing_correction_integrator(self):
+        self._swing_position_offset = np.zeros(2)
+        self._last_future_time = 0
+
+    def _project_swing_model(self, timestamp=None):
         sm = self.gripper_swing_model
         st = self.swing_model_ts
         if sm is None or st is None:
             return None
 
-        # calculate swing cancellation
-        latency_comp = future_time - st
+        if timestamp is None:
+            return np.asarray(sm, dtype=float)
+
+        latency_comp = timestamp - st
         look_ahead_angle = OMEGA * latency_comp
         c_future, s_future = np.cos(look_ahead_angle), np.sin(look_ahead_angle)
-        
-        # The angular acceleration (alpha) is the derivative of the velocity (gyro).
-        # For this model, the derivative is omega * [-sin(theta), cos(theta)].
-        future_accel = OMEGA * (sm[:, 1] * c_future - sm[:, 0] * s_future)
+        return np.asarray(sm, dtype=float) @ np.array([
+            [c_future, -s_future],
+            [s_future, c_future],
+        ])
+
+    def swing_energy(self, timestamp=None):
+        """
+        Return harmonic oscillator energy from the fitted gyro model.
+
+        The model columns are angular velocity-like sine and cosine phase
+        components. For a fixed-frequency oscillator, the squared norm of
+        those columns is proportional to swing energy and is sufficient for
+        ranking damping trials.
+        """
+        state = self._project_swing_model(timestamp)
+        if state is None:
+            return None
+        return 0.5 * float(np.sum(state * state))
+
+    def swing_model_age(self):
+        if self.swing_model_host_ts <= 0:
+            return float('inf')
+        return time.time() - self.swing_model_host_ts
+
+    def get_swing_to_room_angle(self):
+        wrist = self.datastore.winch_line_record.getLast()[1]
+        return wrist / 180 * np.pi + self.config.gripper.frame_room_spin - np.pi/2
+
+    def compute_swing_correction(
+        self,
+        future_time,
+        gain=None,
+        sign=None,
+        max_velocity=None,
+        update_integrator=True,
+    ):
+        """Compute a corrective velocity to be applied at a future time in order to cancel the swing"""
+        state = self._project_swing_model(future_time)
+        if state is None:
+            return None
+
+        if gain is None:
+            gain = getattr(self.config, 'swing_gain', DEFAULT_SWING_GAIN)
+        if sign is None:
+            sign = getattr(self.config, 'swing_sign', DEFAULT_SWING_SIGN)
+        if max_velocity is None:
+            max_velocity = getattr(self.config, 'swing_max_velocity', DEFAULT_SWING_MAX_VELOCITY)
+
+        gain = abs(float(gain))
+        sign = DEFAULT_SWING_SIGN if sign not in (-1.0, 1.0) else float(sign)
+        max_velocity = max(0.0, float(max_velocity))
+
+        # The angular acceleration (alpha) is the derivative of the velocity
+        # component. Projecting first makes the configured latency/phase explicit.
+        future_accel = OMEGA * state[:, 1]
 
         # A corrective velocity to the gantry inversely proportional to the angular velocity of the gripper cancels the swing
-        raw_vel = future_accel * SWING_CANCEL_GAIN
+        raw_vel = future_accel * gain * sign
 
         # cancel accumulated drift introduced from swing cancellation
         # Calculate time elapsed since last call to update the integrator
-        dt = future_time - self._last_future_time
-        self._last_future_time = future_time
+        dt = 0.0
+        if update_integrator:
+            dt = future_time - self._last_future_time
+            self._last_future_time = future_time
 
-        # Ignore massive jumps in time if the control loop paused
-        if dt > 0.5 or dt < 0:
-            dt = 0.0
+            # Ignore massive jumps in time if the control loop paused
+            if dt > 0.5 or dt < 0:
+                dt = 0.0
 
         # Apply a centering restorative velocity proportional to the accumulated position offset
-        centering_vel = self._swing_position_offset * CENTERING_GAIN
+        centering_vel = self._swing_position_offset * CENTERING_GAIN if update_integrator else np.zeros(2)
         vel = raw_vel - centering_vel
 
-        # Track the accumulated position offset based on the velocity we are actually commanding
-        self._swing_position_offset += vel * dt
+        vel_norm = float(np.linalg.norm(vel))
+        if max_velocity == 0:
+            vel = np.zeros(2)
+        elif vel_norm > max_velocity:
+            vel = vel * (max_velocity / vel_norm)
+
+        # Track the accumulated position offset based on the clamped velocity
+        # we are actually commanding.
+        if update_integrator:
+            self._swing_position_offset += vel * dt
 
         # rotate vector into room frame of reference
-        wrist = self.datastore.winch_line_record.getLast()[1]
-        imu_to_room_z = wrist / 180 * np.pi + self.config.gripper.frame_room_spin - np.pi/2
-        return rotate_vector(vel, -imu_to_room_z)
+        return rotate_vector(vel, -self.get_swing_to_room_angle())
 
     def handle_detections(self, detections, timestamp):
         """

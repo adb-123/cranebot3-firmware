@@ -16,9 +16,53 @@ W_DIAMOND_PLANAR = 0.2 # weight for forcing the gantry and eyelets into a single
 W_EYELET_REG = 0.2 # weight to keep eyelets near their initial 5m guess
 W_SHAPE_MATCH = 1.0 # weight to force distance between anchors to match distance between eyelets
 W_ANCHOR_TILT = 10.0 # weight to penalize anchor pitch/roll changes (locks rotation to Z-axis only)
+ROBUST_LOSS = 'soft_l1'
+ROBUST_F_SCALE = 0.1
 
 # half height and half width of diamond
 DIAMOND_SIZE = (0.1, 1.0)
+
+def _normalized_residual_group(values, count=None):
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return arr.flatten()
+    if count is None:
+        count = arr.shape[0] if arr.ndim > 1 else arr.size
+    if count > 1:
+        arr = arr / np.sqrt(count)
+    return arr.flatten()
+
+def _log_solver_result(name, result):
+    try:
+        residuals = np.asarray(getattr(result, 'fun', []), dtype=float)
+    except (TypeError, ValueError):
+        residuals = np.array([], dtype=float)
+    if residuals.size:
+        rms = float(np.sqrt(np.mean(residuals**2)))
+        max_abs = float(np.max(np.abs(residuals)))
+    else:
+        rms = 0.0
+        max_abs = 0.0
+    try:
+        cost = float(getattr(result, 'cost', np.nan))
+    except (TypeError, ValueError):
+        cost = np.nan
+    try:
+        optimality = float(getattr(result, 'optimality', np.nan))
+    except (TypeError, ValueError):
+        optimality = np.nan
+    logger.info(
+        "%s solver status: success=%s status=%s cost=%.6f nfev=%s optimality=%.6f "
+        "residual_rms=%.6f residual_max=%.6f",
+        name,
+        getattr(result, 'success', None),
+        getattr(result, 'status', None),
+        cost,
+        getattr(result, 'nfev', None),
+        optimality,
+        rms,
+        max_abs,
+    )
 
 # =============================================================================
 # DIAMOND STRATEGY DATA STRUCTURE
@@ -104,32 +148,33 @@ def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None,
         
         if marker_name == 'origin':
             # constraint 1: Origin must be at [0,0,0]
-            current_residuals = (projected_positions - np.zeros(3)) * W_ORIGIN
-            residuals.extend(current_residuals.flatten())
+            current_residuals = _normalized_residual_group(
+                (projected_positions - np.zeros(3)) * W_ORIGIN,
+                len(projected_positions),
+            )
+            residuals.extend(current_residuals)
             cost_origin += np.sum(current_residuals**2)
             
         elif len(projected_positions) > 1:
             # constraint 2: Consistency between cameras
             centroid = np.mean(projected_positions, axis=0)
-            current_residuals = (projected_positions - centroid) * W_CONSISTENCY
-            residuals.extend(current_residuals.flatten())
+            current_residuals = _normalized_residual_group(
+                (projected_positions - centroid) * W_CONSISTENCY,
+                len(projected_positions),
+            )
+            residuals.extend(current_residuals)
             cost_origin += np.sum(current_residuals**2)
 
     # ---------------------------------------------------------
     # Anchor and Eyelet Z-Plane Constraint
     # ---------------------------------------------------------
-        # Extract Z coordinates from the 2 anchors and 2 eyelets
-        anchor_zs = anchor_poses[:, 1, 2]
-        eyelet_zs = eyelet_positions[:, 2]
-        all_zs = np.concatenate([anchor_zs, eyelet_zs])
-        
-        # Calculate the average Z plane
-        avg_z = np.mean(all_zs)
-        
-        # Penalize deviation from the average plane
-        z_residuals = (all_zs - avg_z) * W_PLANAR
-        residuals.extend(z_residuals)
-        cost_planar += np.sum(z_residuals**2)
+    anchor_zs = anchor_poses[:, 1, 2]
+    eyelet_zs = eyelet_positions[:, 2]
+    all_zs = np.concatenate([anchor_zs, eyelet_zs])
+    avg_z = np.mean(all_zs)
+    z_residuals = (all_zs - avg_z) * W_PLANAR
+    residuals.extend(z_residuals)
+    cost_planar += np.sum(z_residuals**2)
 
     # ---------------------------------------------------------
     # Diamond Kinematic & Distance Residuals
@@ -170,13 +215,16 @@ def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None,
         else:
             N_plane = np.array([1.0, 0.0, 0.0]) # Fallback if perfectly stacked
             
-        # Penalize the perpendicular distance of EVERY gantry point to this plane
+        # Penalize the perpendicular distance of every gantry point to this plane.
+        diamond_planar_residuals = []
         for state, points in all_points_per_state.items():
             for p in points:
                 dist_to_plane = np.dot(p - eyelet_positions[0], N_plane)
                 res = dist_to_plane * W_DIAMOND_PLANAR
-                residuals.append(res)
-                cost_diamond_planar += res**2
+                diamond_planar_residuals.append(res)
+        diamond_planar_residuals = _normalized_residual_group(diamond_planar_residuals)
+        residuals.extend(diamond_planar_residuals)
+        cost_diamond_planar += np.sum(diamond_planar_residuals**2)
                 
         # 3b. Distance constraints based on the diamond pattern
         required_states = ['bottom', 'right', 'top', 'left']
@@ -355,10 +403,13 @@ def optimize_arp_anchors(raw_obs, diamond_observations=None, initial_eyelet_gues
         multi_card_residuals,
         x0,
         args=opt_args,
-        method='lm', 
+        method='trf',
+        loss=ROBUST_LOSS,
+        f_scale=ROBUST_F_SCALE,
         verbose=1,
         max_nfev=500,
     )
+    _log_solver_result('arp eyelet calibration', result)
 
     if not result.success:
         logging.error(f"Optimization failed. Status: {result.status}, Msg: {result.message}")

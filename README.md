@@ -40,6 +40,18 @@ options:
   --local_models        Use local models from models/ rather than downloading the production models from huggingface (applicable to the target identification model only)
   --arp_grasp           Use arp_execute_grasp (centering net) instead of act_execute_grasp (ACT policy) for the Arpeggio gripper
   --debug               Enable DEBUG level logging
+  --observability-debug Record bounded telemetry payload summaries at DEBUG level in observability logs
+  --metrics-host        Prometheus metrics bind host, default 0.0.0.0
+  --metrics-port        Prometheus metrics port, default 9464
+  --observability-log   JSON log path scraped by Promtail, default logs/nf_robot-observability.jsonl
+  --no_observability    Disable local Prometheus metrics, OTel traces, and JSON observability logs
+
+### Local observability
+
+The repo includes a local Grafana, Loki, Tempo, Prometheus, OTel Collector, and
+Promtail stack in [`observability/`](observability/README.md). It instruments
+`stringman-headless` with Prometheus metrics, OTel traces, and JSON logs with
+trace IDs.
 
 ### Minimum system specs
 
@@ -64,6 +76,60 @@ The expected inputs are basically marker box velocity and finger and wrist speed
 Higher level control is achived by having a policy such as DIT or a VLA connected to the robot, and having another client sending `nf.common.EpisodeControl` commands with prompts.
 
 See [Imitation Learning](https://neufangled.com/docs/imitation_learning/) for a more detailed guide.
+
+### ROS2 adapter
+
+`stringman-ros2-adapter` bridges the local `stringman-headless` websocket to a
+ROS2 graph. Source ROS2 first, then run the adapter while `stringman-headless`
+is listening on port 4245:
+
+    source /opt/ros/jazzy/setup.bash
+    stringman-headless --config=bedroom.conf
+    stringman-ros2-adapter --ros-args -p server_uri:=ws://127.0.0.1:4245
+
+The adapter publishes typed ROS2 topics under `stringman/` for the main sensor
+and state surfaces, including:
+
+    stringman/pose/gantry
+    stringman/twist/gantry
+    stringman/pose/gripper
+    stringman/tension
+    stringman/slack
+    stringman/gripper/range
+    stringman/gripper/sensors
+    stringman/components/status
+    stringman/video/ready
+    stringman/targets
+    stringman/named_positions
+    stringman/telemetry/raw_json
+    stringman/telemetry/raw_protobuf
+
+It also publishes TF frames from `stringman_world` to `stringman_gantry` and
+`stringman_gripper` when `tf2_ros` is available.
+
+Control inputs are accepted through standard topics:
+
+    stringman/cmd_vel                 # geometry_msgs/Twist, linear m/s, angular.z as wrist rad/s
+    stringman/gripper/cmd             # Float32MultiArray: [finger_speed_deg_s, wrist_speed_deg_s, winch_m_s]
+    stringman/command                 # std_msgs/String, e.g. "stop_all" or "park"
+    stringman/move_gripper_to         # geometry_msgs/PointStamped, world-space meters
+    stringman/debug                   # std_msgs/String debug action
+    stringman/episode_prompt          # std_msgs/String LeRobot prompt
+    stringman/control/json            # full protobuf control escape hatch
+
+Common commands are also exposed as `std_srvs/Trigger` services under
+`stringman/services/`, including `stop_all`, `park`, `unpark`, `grasp`,
+`zero_winch`, `tighten_lines`, `enable_torque`, `disable_torque`,
+`half_cal`, `full_cal`, `auto_calibrate_swing`, and `update_firmware`.
+Swing cancellation is exposed as `std_srvs/SetBool` at
+`stringman/services/swing_cancellation`.
+
+Use `stringman/control/json` for controls that do not have a dedicated typed
+topic. Examples:
+
+    ros2 topic pub --once /stringman/control/json std_msgs/msg/String "{data: '{\"jog_spool\":{\"is_gripper\":false,\"anchor_num\":0,\"speed\":0.01}}'}"
+    ros2 topic pub --once /stringman/control/json std_msgs/msg/String "{data: '{\"move_gripper_to\":{\"x\":0.2,\"y\":0.1,\"z\":0.4}}'}"
+    ros2 topic pub --once /stringman/control/json std_msgs/msg/String "{data: '{\"single_component_action\":{\"is_gripper\":true,\"action\":\"identify\"}}'}"
 
 ## Cloud telemetry relay
 
@@ -196,4 +262,3 @@ A self contained windows installer can be generated. The exact installation of s
 ## Support this project
 
 [Donate on Ko-fi](https://ko-fi.com/neufangled)
-

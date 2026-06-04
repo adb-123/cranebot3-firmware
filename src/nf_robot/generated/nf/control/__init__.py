@@ -49,6 +49,11 @@ class Command(betterproto2.Enum):
     Perform full calibration sequence. (requires setup of cards on the floor)
     """
 
+    AUTO_CALIBRATE_SWING = 19
+    """
+    Auto-calibrate swing cancellation latency, sign, and gain.
+    """
+
     ZERO_WINCH = 3
     """
     Zero the winch line in the gripper by reeling it in until it hits the limit switch
@@ -137,6 +142,7 @@ class Command(betterproto2.Enum):
             0: "COMMAND_UNUSED",
             1: "COMMAND_HALF_CAL",
             2: "COMMAND_FULL_CAL",
+            19: "COMMAND_AUTO_CALIBRATE_SWING",
             3: "COMMAND_ZERO_WINCH",
             4: "COMMAND_STOP_ALL",
             5: "COMMAND_ENABLE_LEROBOT",
@@ -161,6 +167,7 @@ class Command(betterproto2.Enum):
             "COMMAND_UNUSED": 0,
             "COMMAND_HALF_CAL": 1,
             "COMMAND_FULL_CAL": 2,
+            "COMMAND_AUTO_CALIBRATE_SWING": 19,
             "COMMAND_ZERO_WINCH": 3,
             "COMMAND_STOP_ALL": 4,
             "COMMAND_ENABLE_LEROBOT": 5,
@@ -215,6 +222,11 @@ class ComponentAction(betterproto2.Enum):
     Set the angle from horizontal of the camera adapter on Arpeggio anchors.
     """
 
+    STOW = 6
+    """
+    Reel the selected Arpeggio line in until tight, then disable motor torque for storage.
+    """
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
@@ -224,6 +236,7 @@ class ComponentAction(betterproto2.Enum):
             3: "COMPONENTACTION_TIGHTEN",
             4: "COMPONENTACTION_RELAX",
             5: "COMPONENTACTION_SET_CAM_ANGLE",
+            6: "COMPONENTACTION_STOW",
         }
 
     @classmethod
@@ -235,6 +248,7 @@ class ComponentAction(betterproto2.Enum):
             "COMPONENTACTION_TIGHTEN": 3,
             "COMPONENTACTION_RELAX": 4,
             "COMPONENTACTION_SET_CAM_ANGLE": 5,
+            "COMPONENTACTION_STOW": 6,
         }
 
 

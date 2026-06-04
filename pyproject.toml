@@ -57,11 +57,22 @@ pi = [
     "pyzbar",
     "damiao-motor",
 ]
+observability = [
+    "prometheus-client>=0.20",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+]
+observability-test = [
+    "playwright>=1.44",
+    "selenium>=4.22",
+]
 
 [project.scripts] 
 # Main Applications
 component-server = "nf_robot.robot.component_server:main"
 stringman-headless = "nf_robot.host.observer:main"
+stringman-ros2-adapter = "nf_robot.ros2_adapter:main"
 
 # QA Tools
 qa-anchor = "nf_robot.qa.anchor_eval:main"

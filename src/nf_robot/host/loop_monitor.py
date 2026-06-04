@@ -2,6 +2,8 @@ import asyncio
 import time
 import logging
 
+from nf_robot.observability import OBS
+
 logger = logging.getLogger(__name__)
 
 class LoopMonitor:
@@ -39,6 +41,7 @@ class LoopMonitor:
             
             actual_duration = end_time - start_time
             lag = actual_duration - self.interval
+            OBS.record_event_loop_lag(lag)
 
             # If the lag is significant, we are being starved.
             if lag > self.threshold:

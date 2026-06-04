@@ -141,6 +141,7 @@ class GripperArpServer(RobotComponentServer):
         self.filtered_force = 0.0
         self.in_force_mode = False
         self.desired_force = 0.0
+        self._last_feedback_warning_time = {}
         
         # State tracking for the motor overload safety feature
         self.finger_torque_reenable_time = 0.0
@@ -180,16 +181,21 @@ class GripperArpServer(RobotComponentServer):
         self.setWrist(a - 360)
         await asyncio.sleep(4)
         self.motor_loop_pause = True
-        self.motors.reset_encoder_to_midpoint(WRIST)
-        await asyncio.sleep(0.1)
-        wrist_data = self.motors.get_feedback(WRIST)
-        simple_angle = wrist_data['position'] / STEPS_PER_REV * 360
-        logging.info(f'after encoder reset, wrist reports {simple_angle}. should be 180. moving one rev positive to 540')
-        self.last_simple_wrist_angle = 180.0
-        self.unrolled_wrist_angle = 180.0
-        self.wrist_step_offset = 0.0
-        self.setWrist(180)
-        self.motor_loop_pause = False
+        try:
+            self.motors.reset_encoder_to_midpoint(WRIST)
+            await asyncio.sleep(0.1)
+            wrist_data = self._get_motor_feedback(WRIST, "wrist")
+            if wrist_data is None:
+                simple_angle = 180.0
+            else:
+                simple_angle = wrist_data['position'] / STEPS_PER_REV * 360
+            logging.info(f'after encoder reset, wrist reports {simple_angle}. should be 180. moving one rev positive to 540')
+            self.last_simple_wrist_angle = 180.0
+            self.unrolled_wrist_angle = 180.0
+            self.wrist_step_offset = 0.0
+            self.setWrist(180)
+        finally:
+            self.motor_loop_pause = False
         await asyncio.sleep(0.1)
         self.setWrist(540)
         end = time.time() + 4
@@ -199,12 +205,30 @@ class GripperArpServer(RobotComponentServer):
         a = self.getWristAngle()
         logging.info(f'Resest wrist. should be 540. ({a})') 
 
+    def _log_feedback_warning(self, label, exc, min_interval=2.0):
+        now = time.time()
+        last_log = self._last_feedback_warning_time.get(label, 0.0)
+        if now - last_log >= min_interval:
+            logging.warning(f"{label} feedback read failed; using last known state. {exc}")
+            self._last_feedback_warning_time[label] = now
+
+    def _get_motor_feedback(self, motor_id, label):
+        try:
+            return self.motors.get_feedback(motor_id)
+        except (TimeoutError, ValueError) as e:
+            self._log_feedback_warning(label, e)
+            return None
+
     def getWristAngle(self):
         # motor only reports it's position within one revolution.
         # even though you can command multi turns from it.
         # return a value between 0 and 1080, which is the same range we accept commands in.
         # 540 is the neutral position.
-        wrist_data = self.motors.get_feedback(WRIST)
+        wrist_data = self._get_motor_feedback(WRIST, "wrist")
+        if wrist_data is None:
+            if self.last_simple_wrist_angle is None:
+                return clamp(self.saved_unrolled_wrist_angle, 0, 1080)
+            return clamp(self.unrolled_wrist_angle, 0, 1080)
         simple_angle = wrist_data['position'] / STEPS_PER_REV * 360
 
         # Anchor continuous tracking to the motor's actual physical position at boot
@@ -253,12 +277,15 @@ class GripperArpServer(RobotComponentServer):
             'dforce': self.desired_force if self.in_force_mode else 0,
         }
 
-        if self.rangefinder.data_ready:
-            distance = self.rangefinder.distance
-            # If the floor is out of range, distance is None
-            if distance:
-                self.rangefinder.clear_interrupt()
-                self.update['grip_sensors']['range'] = distance / 100
+        try:
+            if self.rangefinder.data_ready:
+                distance = self.rangefinder.distance
+                # If the floor is out of range, distance is None
+                if distance:
+                    self.rangefinder.clear_interrupt()
+                    self.update['grip_sensors']['range'] = distance / 100
+        except (OSError, RuntimeError, TimeoutError, ValueError) as e:
+            self._log_feedback_warning("rangefinder", e)
 
     def checkMotorLoad(self, finger_data, wrist_data):
         # Prevent repetitive triggering by checking if the re-enable timer is already running
@@ -276,10 +303,14 @@ class GripperArpServer(RobotComponentServer):
             self.wrist_torque_reenable_time = time.time() + 1.0
 
     def get_current_grip_force(self):
-        self.last_finger_data = self.motors.get_feedback(FINGER)
+        finger_data = self._get_motor_feedback(FINGER, "finger")
+        if finger_data is not None:
+            self.last_finger_data = finger_data
         
         # Values greater than 1000 represent load in the opposite direction, which is irrelevant for grip force
-        raw_load = self.last_finger_data['load'] if self.last_finger_data['load'] <= 1000 else 0
+        raw_load = 0
+        if self.last_finger_data is not None:
+            raw_load = self.last_finger_data['load'] if self.last_finger_data['load'] <= 1000 else 0
         norm_load = min(raw_load / self.conf['MAX_SAFE_LOAD'], 1.0)
         
         # Force Sensitive Resistors (FSRs) drop resistance logarithmically with applied force, 
@@ -358,8 +389,9 @@ class GripperArpServer(RobotComponentServer):
                 
                 # Check for safety overload conditions on every loop iteration
                 # We fetch wrist data here as well since get_current_grip_force only pulls finger data
-                wrist_data = self.motors.get_feedback(WRIST)
-                self.checkMotorLoad(self.last_finger_data, wrist_data)
+                wrist_data = self._get_motor_feedback(WRIST, "wrist")
+                if self.last_finger_data is not None and wrist_data is not None:
+                    self.checkMotorLoad(self.last_finger_data, wrist_data)
 
                 if not self.in_force_mode:
                     pa = self.desired_finger_angle
@@ -428,7 +460,12 @@ class GripperArpServer(RobotComponentServer):
 
             # Get current angular velocity (rad/s)
             # MPU6050 returns (gx, gy, gz) in rad/s
-            current_gyro = np.array(self.imu.gyro[:2])
+            try:
+                current_gyro = np.array(self.imu.gyro[:2])
+            except (OSError, RuntimeError, TimeoutError, ValueError) as e:
+                self._log_feedback_warning("imu", e)
+                await asyncio.sleep(1/100)
+                continue
 
             step_angle = self.omega * dt
             c_step, s_step = np.cos(step_angle), np.sin(step_angle)

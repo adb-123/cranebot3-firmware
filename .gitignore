@@ -4,6 +4,8 @@ module-venv
 __pycache__
 */__pycache__
 cranebot.log
+logs/
+observability/.screenshots/
 gant_pos.npy
 conf*.json
 *.pt
@@ -27,3 +29,4 @@ eggs_heatmap_data/
 fixed_dataset_workspace/
 datasets/
 images/
+.gstack/

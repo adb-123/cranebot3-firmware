@@ -1,0 +1,1286 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [
+    {
+      "title": "Prometheus targets",
+      "url": "http://localhost:9090/targets",
+      "type": "link",
+      "targetBlank": true
+    },
+    {
+      "title": "Runbook",
+      "url": "observability/README.md",
+      "type": "link",
+      "targetBlank": true
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Stack Targets Online",
+      "description": "Prometheus scrape health for Grafana, Loki, Tempo, Promtail, OTel Collector, and Prometheus itself.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 4
+              },
+              {
+                "color": "green",
+                "value": 6
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphOrientation": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "sum(up{job=~\"prometheus|grafana|loki|tempo|promtail|otel-collector\"}) or on() vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "App Metrics Target",
+      "description": "Prometheus target state for stringman-headless on host.docker.internal:9464/metrics. Waiting means the app is stopped or the exporter is not reachable.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "waiting/down",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "scraping",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphOrientation": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "max(up{job=\"stringman-headless\"}) or on() vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "App Heartbeat",
+      "description": "nf_robot_up from app instrumentation. Missing is shown separately from a real unhealthy zero.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "metric missing",
+                  "color": "orange",
+                  "index": 0
+                },
+                "0": {
+                  "text": "unhealthy",
+                  "color": "red",
+                  "index": 1
+                },
+                "1": {
+                  "text": "alive",
+                  "color": "green",
+                  "index": 2
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphOrientation": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "max(nf_robot_up) or on() vector(-1)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Robot Metric Families",
+      "description": "Current robot metric families present out of 81 instrumented families.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 81
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphOrientation": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "sum(label_replace(((count({__name__=\"nf_robot_app_info\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_app_info\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_up\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_up\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_app_exporter_ready\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_app_exporter_ready\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_observability_debug_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_observability_debug_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uptime_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uptime_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_ui_clients\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_ui_clients\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_buffer_items\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_buffer_items\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_payload_expected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_payload_expected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_payload_seen\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_payload_seen\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commands_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commands_total\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_command_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_command_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_items_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_items_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_flushes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flushes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_flush_bytes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flush_bytes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_telemetry_flush_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flush_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_websocket_connections_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_websocket_connections_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_connected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_connected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_video_connected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_video_connected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_websocket_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_websocket_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_video_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_video_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_temperature_celsius\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_temperature_celsius\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_motor_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_motor_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_error\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_error\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_expected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_expected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_waiting\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_waiting\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_last_seen_age_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_last_seen_age_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stream_clients\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stream_clients\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_frames_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_frames_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_bytes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_bytes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_detection_rate_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_detection_rate_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_latency_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_latency_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_framerate\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_framerate\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stats_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stats_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stats_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stats_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_feed_ready\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_feed_ready\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_feed_ready_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_feed_ready_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_video_jpeg_encode_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_jpeg_encode_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_event_loop_lag_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_event_loop_lag_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_factor_value\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_factor_value\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gantry_sightings\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gantry_sightings\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_anchor_poses\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_anchor_poses\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_named_position_visible\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_named_position_visible\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_named_position_meters\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_named_position_meters\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_line_tension_newtons\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_line_tension_newtons\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_max_safe_tension_newtons\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_max_safe_tension_newtons\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_tension_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_tension_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_line_slack\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_line_slack\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_meters\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_meters\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_velocity_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_velocity_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_velocity_norm_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_velocity_norm_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_age_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_age_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensor\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensor\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensor_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensor_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensors_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensors_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensors_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensors_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_progress_percent\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_progress_percent\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_active\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_active\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_norm_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_norm_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_targets_known\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_targets_known\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_targets_by_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_targets_by_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_target_list_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_target_list_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_grip_cam_prediction\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_grip_cam_prediction\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uplink_online\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uplink_online\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uplink_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uplink_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_lerobot_episode_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_lerobot_episode_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_calibration_origin_visible_anchors\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_calibration_origin_visible_anchors\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_calibration_anchor_sees_origin\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_calibration_anchor_sees_origin\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_safety_tension_stops_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_safety_tension_stops_total\", \"__name__\", \".*\")) or on() vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Log Bytes Tailed",
+      "description": "Promtail file bytes tailed from local app logs. Zero means waiting for log output or file discovery.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphOrientation": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "sum(promtail_file_bytes_total) or on() vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Tempo Spans Received",
+      "description": "Tempo distributor spans received by the local observability stack.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphOrientation": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "sum(tempo_distributor_spans_received_total) or on() vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "App Target and Debug Instrumentation Status",
+      "description": "Read this first when robot panels are waiting. It distinguishes scrape reachability, exporter initialization, heartbeat, debug payload logging, and metric-family presence.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "waiting/missing",
+                  "color": "orange",
+                  "index": 0
+                },
+                "1": {
+                  "text": "present/up",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "label_replace(((count(up{job=\"stringman-headless\"}) or on() vector(0)) > bool 0), \"check\", \"Prometheus target configured\", \"__name__\", \".*\") or label_replace((max(up{job=\"stringman-headless\"}) or on() vector(0)), \"check\", \"metrics endpoint scrape reachable\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_app_info\"}) or on() vector(0)) > bool 0), \"check\", \"app info labels emitted\", \"__name__\", \".*\") or label_replace((max(nf_robot_app_exporter_ready) or on() vector(0)), \"check\", \"app exporter initialized\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_up\"}) or on() vector(0)) > bool 0), \"check\", \"app heartbeat metric emitted\", \"__name__\", \".*\") or label_replace((max(nf_robot_observability_debug_enabled) or on() vector(0)), \"check\", \"debug payload recording enabled\", \"__name__\", \".*\") or label_replace(((sum(label_replace(((count({__name__=\"nf_robot_app_info\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_app_info\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_up\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_up\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_app_exporter_ready\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_app_exporter_ready\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_observability_debug_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_observability_debug_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uptime_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uptime_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_ui_clients\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_ui_clients\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_buffer_items\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_buffer_items\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_payload_expected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_payload_expected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_payload_seen\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_payload_seen\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commands_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commands_total\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_command_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_command_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_items_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_items_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_flushes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flushes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_flush_bytes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flush_bytes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_telemetry_flush_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flush_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_websocket_connections_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_websocket_connections_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_connected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_connected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_video_connected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_video_connected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_websocket_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_websocket_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_video_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_video_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_temperature_celsius\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_temperature_celsius\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_motor_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_motor_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_error\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_error\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_expected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_expected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_waiting\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_waiting\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_last_seen_age_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_last_seen_age_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stream_clients\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stream_clients\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_frames_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_frames_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_bytes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_bytes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_detection_rate_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_detection_rate_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_latency_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_latency_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_framerate\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_framerate\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stats_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stats_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stats_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stats_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_feed_ready\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_feed_ready\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_feed_ready_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_feed_ready_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_video_jpeg_encode_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_jpeg_encode_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_event_loop_lag_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_event_loop_lag_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_factor_value\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_factor_value\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gantry_sightings\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gantry_sightings\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_anchor_poses\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_anchor_poses\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_named_position_visible\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_named_position_visible\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_named_position_meters\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_named_position_meters\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_line_tension_newtons\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_line_tension_newtons\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_max_safe_tension_newtons\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_max_safe_tension_newtons\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_tension_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_tension_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_line_slack\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_line_slack\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_meters\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_meters\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_velocity_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_velocity_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_velocity_norm_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_velocity_norm_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_age_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_age_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensor\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensor\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensor_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensor_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensors_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensors_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensors_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensors_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_progress_percent\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_progress_percent\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_active\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_active\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_norm_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_norm_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_targets_known\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_targets_known\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_targets_by_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_targets_by_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_target_list_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_target_list_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_grip_cam_prediction\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_grip_cam_prediction\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uplink_online\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uplink_online\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uplink_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uplink_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_lerobot_episode_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_lerobot_episode_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_calibration_origin_visible_anchors\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_calibration_origin_visible_anchors\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_calibration_anchor_sees_origin\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_calibration_anchor_sees_origin\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_safety_tension_stops_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_safety_tension_stops_total\", \"__name__\", \".*\")) or on() vector(0)) > bool 0), \"check\", \"any robot metric family emitted\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"check\", \"component last-seen metrics emitted\", \"__name__\", \".*\")",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Metric Family Checklist",
+      "description": "One row for every nf_robot metric family registered by app instrumentation, including debug, payload-contract, setup, video-ready, uplink, and calibration metrics. Missing rows stay visible instead of becoming blank charts.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 18,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "missing",
+                  "color": "orange",
+                  "index": 0
+                },
+                "1": {
+                  "text": "present",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "label_replace(((count({__name__=\"nf_robot_app_info\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_app_info\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_up\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_up\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_app_exporter_ready\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_app_exporter_ready\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_observability_debug_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_observability_debug_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uptime_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uptime_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_ui_clients\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_ui_clients\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_buffer_items\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_buffer_items\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_payload_expected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_payload_expected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_payload_seen\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_payload_seen\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commands_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commands_total\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_command_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_command_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_items_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_items_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_flushes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flushes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_telemetry_flush_bytes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flush_bytes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_telemetry_flush_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_telemetry_flush_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_websocket_connections_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_websocket_connections_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_connected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_connected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_video_connected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_video_connected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_websocket_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_websocket_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_video_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_video_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_temperature_celsius\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_temperature_celsius\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_motor_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_motor_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_error\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_error\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_expected\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_expected\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_waiting\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_waiting\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_component_last_seen_age_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_component_last_seen_age_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stream_clients\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stream_clients\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_frames_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_frames_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_bytes_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_bytes_total\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_detection_rate_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_detection_rate_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_latency_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_latency_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_framerate\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_framerate\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stats_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stats_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_stats_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_stats_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_feed_ready\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_feed_ready\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_video_feed_ready_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_feed_ready_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=~\"nf_robot_video_jpeg_encode_duration_seconds(_bucket|_sum|_count)?\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_video_jpeg_encode_duration_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_event_loop_lag_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_event_loop_lag_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_factor_value\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_factor_value\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gantry_sightings\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gantry_sightings\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_anchor_poses\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_anchor_poses\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_named_position_visible\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_named_position_visible\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_named_position_meters\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_named_position_meters\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_line_tension_newtons\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_line_tension_newtons\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_max_safe_tension_newtons\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_max_safe_tension_newtons\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_tension_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_tension_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_line_slack\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_line_slack\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_meters\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_meters\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_velocity_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_velocity_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_velocity_norm_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_velocity_norm_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_age_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_age_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_position_estimate_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_position_estimate_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensor\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensor\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensor_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensor_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensors_available\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensors_available\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_gripper_sensors_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_gripper_sensors_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_progress_percent\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_progress_percent\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_active\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_active\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_operation_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_operation_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_norm_meters_per_second\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_norm_meters_per_second\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_velocity_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_velocity_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_commanded_grip_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_commanded_grip_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_enabled\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_enabled\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_present\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_present\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_swing_cancellation_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_swing_cancellation_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_targets_known\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_targets_known\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_targets_by_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_targets_by_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_target_list_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_target_list_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_grip_cam_prediction\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_grip_cam_prediction\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uplink_online\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uplink_online\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_uplink_last_seen_timestamp_seconds\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_uplink_last_seen_timestamp_seconds\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_lerobot_episode_status\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_lerobot_episode_status\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_calibration_origin_visible_anchors\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_calibration_origin_visible_anchors\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_calibration_anchor_sees_origin\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_calibration_anchor_sees_origin\", \"__name__\", \".*\") or label_replace(((count({__name__=\"nf_robot_safety_tension_stops_total\"}) or on() vector(0)) > bool 0), \"metric\", \"nf_robot_safety_tension_stops_total\", \"__name__\", \".*\")",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "waiting/not seen",
+                  "color": "orange",
+                  "index": 0
+                },
+                "1": {
+                  "text": "seen",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "id": 18,
+      "title": "Telemetry Payload Contract",
+      "description": "Every telemetry payload type the app knows how to instrument. Expected stays visible, seen flips to 1 when that stream arrives, and age shows staleness for streams that have arrived.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "targets": [
+        {
+          "expr": "label_replace(max by (item_type) (nf_robot_telemetry_payload_expected), \"signal\", \"payload expected\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for payload contract\", \"__name__\", \".*\"), \"item_type\", \"waiting\", \"__name__\", \".*\") or label_replace(max by (item_type) (nf_robot_telemetry_payload_seen), \"signal\", \"payload seen since app start\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for payload seen gauges\", \"__name__\", \".*\"), \"item_type\", \"waiting\", \"__name__\", \".*\") or label_replace((time() - max by (item_type) (nf_robot_telemetry_last_seen_timestamp_seconds)) and on(item_type) max by (item_type) (nf_robot_telemetry_payload_seen), \"signal\", \"payload age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for payload age seconds\", \"__name__\", \".*\"), \"item_type\", \"waiting\", \"__name__\", \".*\") or label_replace(sum by (item_type) (rate(nf_robot_telemetry_items_total[1m])), \"signal\", \"payload items per second\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for payload items per second\", \"__name__\", \".*\"), \"item_type\", \"waiting\", \"__name__\", \".*\")",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Runtime, Commands, and Telemetry",
+      "description": "Operator UI, event loop, command, telemetry, and histogram summaries. Waiting rows name the missing signal explicitly.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "(label_replace(max(nf_robot_up), \"signal\", \"app heartbeat\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for app heartbeat\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_app_exporter_ready), \"signal\", \"app exporter ready\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for app exporter ready\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_observability_debug_enabled), \"signal\", \"observability debug enabled\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for observability debug enabled\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_uptime_seconds), \"signal\", \"uptime seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for uptime seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_ui_clients), \"signal\", \"operator UI clients\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for operator UI clients\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_telemetry_buffer_items), \"signal\", \"telemetry buffer items\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for telemetry buffer items\", \"__name__\", \".*\")) or (label_replace(sum(nf_robot_telemetry_payload_seen), \"signal\", \"payload streams seen\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for payload streams seen\", \"__name__\", \".*\")) or (label_replace(time() - max by (item_type) (nf_robot_telemetry_last_seen_timestamp_seconds), \"signal\", \"telemetry item age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for telemetry item age seconds\", \"__name__\", \".*\"), \"item_type\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_event_loop_lag_seconds), \"signal\", \"event loop lag seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for event loop lag seconds\", \"__name__\", \".*\")) or (label_replace(sum(rate(nf_robot_commands_total[1m])), \"signal\", \"commands per second\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for commands per second\", \"__name__\", \".*\")) or (label_replace(sum(nf_robot_commands_total), \"signal\", \"commands total\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for commands total\", \"__name__\", \".*\")) or (label_replace(histogram_quantile(0.95, sum by (le) (rate(nf_robot_command_duration_seconds_bucket[5m]))), \"signal\", \"command p95 seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for command p95 seconds\", \"__name__\", \".*\")) or (label_replace(sum(rate(nf_robot_telemetry_items_total[1m])), \"signal\", \"telemetry items per second\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for telemetry items per second\", \"__name__\", \".*\")) or (label_replace(sum(rate(nf_robot_telemetry_flushes_total[1m])), \"signal\", \"telemetry flushes per second\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for telemetry flushes per second\", \"__name__\", \".*\")) or (label_replace(sum(rate(nf_robot_telemetry_flush_bytes_total[1m])), \"signal\", \"telemetry flush bytes per second\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for telemetry flush bytes per second\", \"__name__\", \".*\")) or (label_replace(histogram_quantile(0.95, sum by (le) (rate(nf_robot_telemetry_flush_duration_seconds_bucket[5m]))), \"signal\", \"telemetry flush p95 seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for telemetry flush p95 seconds\", \"__name__\", \".*\"))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Component Connections and Health",
+      "description": "Anchor/gripper websocket, video, expected/waiting, status-code, temperature, motor, error, and last-seen signals with fallback component labels.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "(label_replace(sum by (component, outcome) (rate(nf_robot_component_websocket_connections_total[5m])), \"signal\", \"websocket connections per second\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for websocket connections per second\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"outcome\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_connected), \"signal\", \"websocket connected\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for websocket connected\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_video_connected), \"signal\", \"video connected\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for video connected\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind, status) (nf_robot_component_websocket_status), \"signal\", \"websocket status code\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for websocket status code\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\"), \"status\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (component, kind, status) (nf_robot_component_video_status), \"signal\", \"video status code\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for video status code\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\"), \"status\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_expected), \"signal\", \"component expected\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for component expected\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_waiting), \"signal\", \"component waiting\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for component waiting\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_temperature_celsius), \"signal\", \"temperature celsius\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for temperature celsius\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_motor_enabled), \"signal\", \"motor enabled\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for motor enabled\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_error), \"signal\", \"component error\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for component error\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(time() - max by (component, kind) (nf_robot_component_last_seen_timestamp_seconds), \"signal\", \"last seen age from timestamp seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for last seen age from timestamp seconds\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (component, kind) (nf_robot_component_last_seen_age_seconds), \"signal\", \"last seen age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for last seen age seconds\", \"__name__\", \".*\"), \"component\", \"waiting for component metrics\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\"))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Video Stream Metrics",
+      "description": "MJPEG stream clients, frame/byte throughput, detection rate, latency, framerate, stats availability, stats age, and JPEG encode latency.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "(label_replace(max by (port) (nf_robot_video_stream_clients), \"signal\", \"stream clients\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for stream clients\", \"__name__\", \".*\"), \"port\", \"waiting\", \"__name__\", \".*\")) or (label_replace(sum by (streamer) (rate(nf_robot_video_frames_total[1m])), \"signal\", \"frames per second\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for frames per second\", \"__name__\", \".*\"), \"streamer\", \"waiting\", \"__name__\", \".*\")) or (label_replace(sum by (port) (rate(nf_robot_video_bytes_total[1m])), \"signal\", \"bytes per second\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for bytes per second\", \"__name__\", \".*\"), \"port\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_video_detection_rate_per_second), \"signal\", \"detections per second\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for detections per second\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_video_latency_seconds), \"signal\", \"latency seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for latency seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_video_framerate), \"signal\", \"framerate\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for framerate\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_video_stats_available), \"signal\", \"video stats available\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for video stats available\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_video_stats_last_seen_timestamp_seconds), \"signal\", \"video stats age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for video stats age seconds\", \"__name__\", \".*\")) or (label_replace(histogram_quantile(0.95, sum by (port, le) (rate(nf_robot_video_jpeg_encode_duration_seconds_bucket[5m]))), \"signal\", \"jpeg encode p95 seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for jpeg encode p95 seconds\", \"__name__\", \".*\"), \"port\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (feed, component, transport) (nf_robot_video_feed_ready), \"signal\", \"video feed ready\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for video feed ready\", \"__name__\", \".*\"), \"feed\", \"waiting\", \"__name__\", \".*\"), \"component\", \"waiting\", \"__name__\", \".*\"), \"transport\", \"unknown\", \"__name__\", \".*\")) or (label_replace(time() - max by (feed, component) (nf_robot_video_feed_ready_last_seen_timestamp_seconds), \"signal\", \"video ready age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for video ready age seconds\", \"__name__\", \".*\"), \"feed\", \"waiting\", \"__name__\", \".*\"), \"component\", \"waiting\", \"__name__\", \".*\"))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Tension, Motion, and Gripper Metrics",
+      "description": "Tension availability, line slack, robot position, velocity, estimate availability, estimate age, and gripper sensor values. Waiting rows identify missing pose/tension/gripper instrumentation.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "(label_replace(max by (line) (nf_robot_line_tension_newtons), \"signal\", \"line tension newtons\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for line tension newtons\", \"__name__\", \".*\"), \"line\", \"waiting for tension metrics\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_max_safe_tension_newtons), \"signal\", \"max safe tension newtons\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for max safe tension newtons\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_tension_available), \"signal\", \"tension available\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for tension available\", \"__name__\", \".*\")) or (label_replace(max by (line) (nf_robot_line_slack), \"signal\", \"line slack\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for line slack\", \"__name__\", \".*\"), \"line\", \"waiting for tension metrics\", \"__name__\", \".*\")) or (label_replace(max by (part, axis) (nf_robot_position_meters), \"signal\", \"position meters\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for position meters\", \"__name__\", \".*\"), \"part\", \"waiting for pose metrics\", \"__name__\", \".*\"), \"axis\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (axis) (nf_robot_velocity_meters_per_second), \"signal\", \"velocity meters per second\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for velocity meters per second\", \"__name__\", \".*\"), \"axis\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_velocity_norm_meters_per_second), \"signal\", \"velocity norm meters per second\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for velocity norm meters per second\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_position_estimate_available), \"signal\", \"position estimate available\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for position estimate available\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_position_estimate_age_seconds), \"signal\", \"position estimate age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for position estimate age seconds\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_position_estimate_last_seen_timestamp_seconds), \"signal\", \"position estimate last-seen age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for position estimate last-seen age seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_gripper_sensors_available), \"signal\", \"gripper sensors available\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for gripper sensors available\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_gripper_sensors_last_seen_timestamp_seconds), \"signal\", \"gripper sensors last-seen age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for gripper sensors last-seen age seconds\", \"__name__\", \".*\")) or (label_replace(max by (sensor) (nf_robot_gripper_sensor), \"signal\", \"gripper sensor\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for gripper sensor\", \"__name__\", \".*\"), \"sensor\", \"waiting for gripper metrics\", \"__name__\", \".*\")) or (label_replace(max by (sensor) (nf_robot_gripper_sensor_present), \"signal\", \"gripper sensor present\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for gripper sensor present\", \"__name__\", \".*\"), \"sensor\", \"waiting for gripper metrics\", \"__name__\", \".*\")) or (label_replace(max by (factor, axis) (nf_robot_position_factor_value), \"signal\", \"position factor value\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for position factor value\", \"__name__\", \".*\"), \"factor\", \"waiting\", \"__name__\", \".*\"), \"axis\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_gantry_sightings), \"signal\", \"gantry sightings\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for gantry sightings\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_anchor_poses), \"signal\", \"anchor poses\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for anchor poses\", \"__name__\", \".*\")) or (label_replace(max by (name) (nf_robot_named_position_visible), \"signal\", \"named position visible\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for named position visible\", \"__name__\", \".*\"), \"name\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (name, axis) (nf_robot_named_position_meters), \"signal\", \"named position meters\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for named position meters\", \"__name__\", \".*\"), \"name\", \"waiting\", \"__name__\", \".*\"), \"axis\", \"unknown\", \"__name__\", \".*\")) or (label_replace(label_replace(max by (signal) (nf_robot_grip_cam_prediction), \"prediction\", \"$1\", \"signal\", \"(.*)\"), \"signal\", \"grip camera prediction\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for grip camera prediction\", \"__name__\", \".*\"), \"prediction\", \"waiting\", \"__name__\", \".*\"), \"source\", \"fallback\", \"__name__\", \".*\"))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Operation and Safety Metrics",
+      "description": "Long-running operation state and passive safety stop counters without blank zero-line charts.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "(label_replace(max by (operation) (nf_robot_operation_progress_percent), \"signal\", \"operation progress percent\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for operation progress percent\", \"__name__\", \".*\"), \"operation\", \"waiting for operation metrics\", \"__name__\", \".*\")) or (label_replace(max by (operation) (nf_robot_operation_active), \"signal\", \"operation active\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for operation active\", \"__name__\", \".*\"), \"operation\", \"waiting for operation metrics\", \"__name__\", \".*\")) or (label_replace(time() - max by (operation) (nf_robot_operation_last_seen_timestamp_seconds), \"signal\", \"operation last-seen age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for operation last-seen age seconds\", \"__name__\", \".*\"), \"operation\", \"waiting for operation metrics\", \"__name__\", \".*\")) or (label_replace(sum(rate(nf_robot_safety_tension_stops_total[5m])), \"signal\", \"safety tension stops per second\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for safety tension stops per second\", \"__name__\", \".*\")) or (label_replace(sum(nf_robot_safety_tension_stops_total), \"signal\", \"safety tension stops total\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for safety tension stops total\", \"__name__\", \".*\"))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Commanded State, Uplink, Calibration, Swing, and Target Queue",
+      "description": "Commanded velocity/grip, uplink, Lerobot episode status, calibration visibility, swing cancellation, and target queue metrics. Missing command telemetry stays visible as waiting rows.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "(label_replace(max by (kind, axis) (nf_robot_commanded_velocity_meters_per_second), \"signal\", \"commanded velocity meters per second\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for commanded velocity meters per second\", \"__name__\", \".*\"), \"kind\", \"waiting\", \"__name__\", \".*\"), \"axis\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (kind) (nf_robot_commanded_velocity_norm_meters_per_second), \"signal\", \"commanded velocity norm meters per second\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for commanded velocity norm meters per second\", \"__name__\", \".*\"), \"kind\", \"waiting\", \"__name__\", \".*\")) or (label_replace(time() - max by (kind) (nf_robot_commanded_velocity_last_seen_timestamp_seconds), \"signal\", \"commanded velocity age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for commanded velocity age seconds\", \"__name__\", \".*\"), \"kind\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (command) (nf_robot_commanded_grip), \"signal\", \"commanded grip\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for commanded grip\", \"__name__\", \".*\"), \"command\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (command) (nf_robot_commanded_grip_present), \"signal\", \"commanded grip present\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for commanded grip present\", \"__name__\", \".*\"), \"command\", \"waiting\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_commanded_grip_last_seen_timestamp_seconds), \"signal\", \"commanded grip age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for commanded grip age seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_swing_cancellation_enabled), \"signal\", \"swing cancellation enabled\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for swing cancellation enabled\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_swing_cancellation_present), \"signal\", \"swing cancellation present\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for swing cancellation present\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_swing_cancellation_last_seen_timestamp_seconds), \"signal\", \"swing cancellation age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for swing cancellation age seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_targets_known), \"signal\", \"targets known\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for targets known\", \"__name__\", \".*\")) or (label_replace(max by (status, source) (nf_robot_targets_by_status), \"signal\", \"targets by status\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for targets by status\", \"__name__\", \".*\"), \"status\", \"waiting\", \"__name__\", \".*\"), \"source\", \"unknown\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_target_list_last_seen_timestamp_seconds), \"signal\", \"target list age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for target list age seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_uplink_online), \"signal\", \"uplink online\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for uplink online\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_uplink_last_seen_timestamp_seconds), \"signal\", \"uplink age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for uplink age seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_lerobot_episode_status), \"signal\", \"lerobot episode status\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for lerobot episode status\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_calibration_origin_visible_anchors), \"signal\", \"calibration origin visible anchors\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for calibration origin visible anchors\", \"__name__\", \".*\")) or (label_replace(max by (anchor) (nf_robot_calibration_anchor_sees_origin), \"signal\", \"calibration anchor sees origin\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for calibration anchor sees origin\", \"__name__\", \".*\"), \"anchor\", \"waiting\", \"__name__\", \".*\"))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Exporter, Feeds, Estimator, and Calibration Diagnostics",
+      "description": "Exporter/debug readiness plus telemetry contract, video feed, estimator, named-position, grip-camera, uplink, Lerobot episode, and calibration metrics. Waiting rows name the missing debug surface.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "unit": "short",
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "(label_replace(max(nf_robot_app_exporter_ready), \"signal\", \"app exporter ready\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for app exporter ready\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_observability_debug_enabled), \"signal\", \"observability debug enabled\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for observability debug enabled\", \"__name__\", \".*\")) or (label_replace(max by (item_type) (nf_robot_telemetry_payload_expected), \"signal\", \"telemetry payload expected\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for telemetry payload expected\", \"__name__\", \".*\"), \"item_type\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (item_type) (nf_robot_telemetry_payload_seen), \"signal\", \"telemetry payload seen\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for telemetry payload seen\", \"__name__\", \".*\"), \"item_type\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (feed, component, transport, kind, scope) (nf_robot_video_feed_ready), \"signal\", \"video feed ready\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for video feed ready\", \"__name__\", \".*\"), \"feed\", \"waiting\", \"__name__\", \".*\"), \"component\", \"unknown\", \"__name__\", \".*\"), \"transport\", \"unknown\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\"), \"scope\", \"unknown\", \"__name__\", \".*\")) or (label_replace(time() - max by (feed, component) (nf_robot_video_feed_ready_last_seen_timestamp_seconds), \"signal\", \"video feed ready age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for video feed ready age seconds\", \"__name__\", \".*\"), \"feed\", \"waiting\", \"__name__\", \".*\"), \"component\", \"unknown\", \"__name__\", \".*\")) or (label_replace(time() - max by (feed, component, kind, scope) (nf_robot_video_feed_last_seen_timestamp_seconds), \"signal\", \"video feed last-seen age seconds\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for video feed last-seen age seconds\", \"__name__\", \".*\"), \"feed\", \"waiting\", \"__name__\", \".*\"), \"component\", \"unknown\", \"__name__\", \".*\"), \"kind\", \"unknown\", \"__name__\", \".*\"), \"scope\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max by (factor, axis) (nf_robot_position_factor_value), \"signal\", \"position factor value\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for position factor value\", \"__name__\", \".*\"), \"factor\", \"waiting\", \"__name__\", \".*\"), \"axis\", \"unknown\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_gantry_sightings), \"signal\", \"gantry sightings\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for gantry sightings\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_anchor_poses), \"signal\", \"anchor poses\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for anchor poses\", \"__name__\", \".*\")) or (label_replace(max by (name) (nf_robot_named_position_visible), \"signal\", \"named position visible\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for named position visible\", \"__name__\", \".*\"), \"name\", \"waiting\", \"__name__\", \".*\")) or (label_replace(max by (name, axis) (nf_robot_named_position_meters), \"signal\", \"named position meters\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for named position meters\", \"__name__\", \".*\"), \"name\", \"waiting\", \"__name__\", \".*\"), \"axis\", \"unknown\", \"__name__\", \".*\")) or (label_replace(label_replace(max by (signal) (nf_robot_grip_cam_prediction), \"prediction\", \"$1\", \"signal\", \"(.*)\"), \"signal\", \"grip camera prediction\", \"__name__\", \".*\") or on() label_replace(label_replace(label_replace(vector(0), \"signal\", \"waiting for grip camera prediction\", \"__name__\", \".*\"), \"prediction\", \"waiting\", \"__name__\", \".*\"), \"source\", \"fallback\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_uplink_online), \"signal\", \"uplink online\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for uplink online\", \"__name__\", \".*\")) or (label_replace(time() - max(nf_robot_uplink_last_seen_timestamp_seconds), \"signal\", \"uplink last-seen age seconds\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for uplink last-seen age seconds\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_lerobot_episode_status), \"signal\", \"lerobot episode status\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for lerobot episode status\", \"__name__\", \".*\")) or (label_replace(max(nf_robot_calibration_origin_visible_anchors), \"signal\", \"calibration origin visible anchors\", \"__name__\", \".*\") or on() label_replace(vector(0), \"signal\", \"waiting for calibration origin visible anchors\", \"__name__\", \".*\")) or (label_replace(max by (anchor) (nf_robot_calibration_anchor_sees_origin), \"signal\", \"calibration anchor sees origin\", \"__name__\", \".*\") or on() label_replace(label_replace(vector(0), \"signal\", \"waiting for calibration anchor sees origin\", \"__name__\", \".*\"), \"anchor\", \"waiting\", \"__name__\", \".*\"))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Scrape Target State Timeline",
+      "description": "State timeline for stack targets and the app metrics target. The app target may wait while stringman-headless is stopped; stack targets should stay up.",
+      "type": "state-timeline",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 76
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0,
+            "spanNulls": false
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "down/waiting",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "up",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "noValue": "waiting",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "showValue": "always",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "max by (job) (up{job=~\"prometheus|grafana|loki|tempo|promtail|otel-collector|stringman-headless\"}) or on() label_replace(vector(0), \"job\", \"waiting for scrape targets\", \"__name__\", \".*\")",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Warnings and Errors",
+      "description": "Recent warning and error JSON logs from stringman-headless. Use this with the debug status table when metrics are waiting.",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      },
+      "options": {
+        "dedupStrategy": "none",
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "{app=\"nf_robot\", service=\"stringman-headless\"} | json | level=~\"(?i)(warn|warning|error|critical)\"",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "Recent App Logs",
+      "description": "Recent JSONL app logs from Loki, including DEBUG telemetry payload summaries when --observability-debug or NF_OBSERVABILITY_DEBUG=1 is enabled.",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 82
+      },
+      "options": {
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{app=\"nf_robot\", service=\"stringman-headless\"} | json",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": [
+    "nf_robot",
+    "observability",
+    "robot-operator"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "NF Robot Observability",
+  "uid": "nf-robot-observability",
+  "version": 9,
+  "weekStart": ""
+}

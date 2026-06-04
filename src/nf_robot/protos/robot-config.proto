@@ -113,4 +113,21 @@ message StringmanPilotConfig {
   // constant offset in seconds at which swing should be estimated
   // seems to depend on the machine you run the motion controller on.
   float swing_latency = 13;
+
+  // Positive scalar used by swing cancellation. The sign is stored separately
+  // so calibration can test phase/sign without hiding it in a signed gain.
+  float swing_gain = 14;
+
+  // Either -1 or 1. A wrong sign/phase turns damping into swing amplification.
+  float swing_sign = 15;
+
+  // Maximum XY correction velocity in meters per second from swing cancellation.
+  float swing_max_velocity = 16;
+
+  // Minimum swing model energy required before automatic calibration will run.
+  float swing_auto_min_energy = 17;
+
+  // Abort a calibration trial when its swing energy grows past this ratio
+  // relative to the pre-trial baseline.
+  float swing_auto_abort_ratio = 18;
 }
