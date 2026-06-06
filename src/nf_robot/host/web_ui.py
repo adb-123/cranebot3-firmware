@@ -165,6 +165,8 @@ class StringmanLanWebUI:
             "robotId": self.robot_id,
             "updatedAt": time.time(),
         }
+        self.expected_anchor_count: int | None = None
+        self.component_statuses: dict[str, telemetry.ComponentConnStatus] = {}
 
     async def start(self) -> Any:
         self.robot_task = asyncio.create_task(self._robot_loop())
@@ -211,9 +213,17 @@ class StringmanLanWebUI:
         path = request.path.split("?", 1)[0]
         if path in (WS_PATH, "/robot-ws"):
             return None
+        if path == "/readyz":
+            return self._ready_response()
         if path == EXTERNAL_CAMERA_PROXY_PATH or path.startswith(f"{EXTERNAL_CAMERA_PROXY_PATH}/"):
             return self._proxy_external_camera_request(request.path)
         return static_response_for_path(request.path)
+
+    def _ready_response(self) -> Response:
+        payload = self._readiness_payload()
+        if payload["ok"]:
+            return _response(200, "OK", _json_bytes(payload) + b"\n", "application/json")
+        return _response(503, "Service Unavailable", _json_bytes(payload) + b"\n", "application/json")
 
     def _proxy_external_camera_request(self, request_path: str) -> Response:
         if not self.external_camera_bridge_uri:
@@ -334,6 +344,7 @@ class StringmanLanWebUI:
                         if isinstance(raw_message, str):
                             raw_message = raw_message.encode("utf-8")
                         batch = telemetry.TelemetryBatchUpdate().parse(raw_message)
+                        self._update_readiness_from_batch(batch)
                         await self._broadcast(telemetry_batch_to_browser_message(batch))
             except asyncio.CancelledError:
                 raise
@@ -365,11 +376,65 @@ class StringmanLanWebUI:
                 "urls": local_lan_urls(self.host, self.port),
             },
             "robot": self.robot_status,
+            "health": self._readiness_payload(),
             "externalCameras": {
                 "configured": self.external_camera_bridge_uri is not None,
                 "uri": self.external_camera_bridge_uri,
                 "proxiedBase": EXTERNAL_CAMERA_PROXY_PATH,
             },
+        }
+
+    def _update_readiness_from_batch(self, batch: telemetry.TelemetryBatchUpdate) -> None:
+        for item in batch.updates:
+            if item.new_anchor_poses is not None:
+                self.expected_anchor_count = len(item.new_anchor_poses.poses)
+            if item.component_conn_status is not None:
+                component = item.component_conn_status
+                key = "gripper" if component.is_gripper else f"anchor-{component.anchor_num}"
+                self.component_statuses[key] = component
+
+    def _readiness_payload(self) -> dict[str, Any]:
+        expected_anchors = self.expected_anchor_count
+        connected_anchors = []
+        missing_anchors = []
+
+        if expected_anchors is not None:
+            for anchor_num in range(expected_anchors):
+                component = self.component_statuses.get(f"anchor-{anchor_num}")
+                if component and component.websocket_status == telemetry.ConnStatus.CONNECTED:
+                    connected_anchors.append(anchor_num)
+                else:
+                    missing_anchors.append(anchor_num)
+
+        gripper = self.component_statuses.get("gripper")
+        gripper_connected = bool(gripper and gripper.websocket_status == telemetry.ConnStatus.CONNECTED)
+        waiting_for_expected_anchors = expected_anchors is None
+        ok = (
+            bool(self.robot_status.get("connected"))
+            and not waiting_for_expected_anchors
+            and not missing_anchors
+            and gripper_connected
+        )
+
+        details = []
+        if not self.robot_status.get("connected"):
+            details.append("controller websocket disconnected")
+        if waiting_for_expected_anchors:
+            details.append("waiting for anchor configuration telemetry")
+        elif missing_anchors:
+            details.append(f"anchors disconnected: {', '.join(str(anchor) for anchor in missing_anchors)}")
+        if not gripper_connected:
+            details.append("gripper disconnected")
+
+        return {
+            "ok": ok,
+            "detail": "ready" if ok else "; ".join(details),
+            "expectedAnchors": expected_anchors,
+            "connectedAnchors": connected_anchors,
+            "missingAnchors": missing_anchors,
+            "gripperConnected": gripper_connected,
+            "robotConnected": bool(self.robot_status.get("connected")),
+            "updatedAt": time.time(),
         }
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:

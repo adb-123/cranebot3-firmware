@@ -104,6 +104,89 @@ def test_bridge_status_message_is_json_serializable():
     json.dumps(app._bridge_status_message())
 
 
+def test_readyz_fails_before_required_components_are_connected():
+    app = StringmanLanWebUI(host="127.0.0.1", port=8080)
+
+    response = app._ready_response()
+    body = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert body["ok"] is False
+    assert "controller websocket disconnected" in body["detail"]
+
+
+def test_readyz_requires_all_expected_anchors_and_gripper():
+    app = StringmanLanWebUI(host="127.0.0.1", port=8080)
+    app.robot_status["connected"] = True
+
+    app._update_readiness_from_batch(
+        telemetry.TelemetryBatchUpdate(
+            updates=[
+                telemetry.TelemetryItem(
+                    new_anchor_poses=telemetry.AnchorPoses(
+                        poses=[common.Pose(), common.Pose()]
+                    )
+                ),
+                telemetry.TelemetryItem(
+                    component_conn_status=telemetry.ComponentConnStatus(
+                        anchor_num=0,
+                        websocket_status=telemetry.ConnStatus.CONNECTED,
+                    )
+                ),
+                telemetry.TelemetryItem(
+                    component_conn_status=telemetry.ComponentConnStatus(
+                        anchor_num=1,
+                        websocket_status=telemetry.ConnStatus.CONNECTING,
+                    )
+                ),
+                telemetry.TelemetryItem(
+                    component_conn_status=telemetry.ComponentConnStatus(
+                        is_gripper=True,
+                        websocket_status=telemetry.ConnStatus.CONNECTED,
+                    )
+                ),
+            ]
+        )
+    )
+
+    response = app._ready_response()
+    body = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert body["ok"] is False
+    assert body["missingAnchors"] == [1]
+    assert body["gripperConnected"] is True
+
+    app._update_readiness_from_batch(
+        telemetry.TelemetryBatchUpdate(
+            updates=[
+                telemetry.TelemetryItem(
+                    component_conn_status=telemetry.ComponentConnStatus(
+                        anchor_num=1,
+                        websocket_status=telemetry.ConnStatus.CONNECTED,
+                    )
+                )
+            ]
+        )
+    )
+
+    response = app._ready_response()
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["missingAnchors"] == []
+
+
+def test_bridge_status_includes_component_health():
+    app = StringmanLanWebUI(host="127.0.0.1", port=8080)
+
+    status = app._bridge_status_message()
+
+    assert status["health"]["ok"] is False
+    assert status["health"]["robotConnected"] is False
+
+
 def test_bridge_status_reports_external_camera_proxy_when_configured():
     app = StringmanLanWebUI(
         host="127.0.0.1",
