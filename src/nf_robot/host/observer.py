@@ -158,6 +158,7 @@ PASSIVE_SAFE_TENSION_N = 17.0
 PASSIVE_SAFE_RELEASE_MARGIN_N = 0.5
 PASSIVE_SAFE_RELEASE_RESET_MARGIN_N = 1.5
 PASSIVE_SAFE_RELEASE_LENGTH_M = 0.1524
+PASSIVE_SAFE_PICKUP_LENGTH_M = 0.0254
 PASSIVE_SAFE_RELEASE_MAX_SPEED_MPS = 0.035
 PASSIVE_SAFE_RELEASE_RAMP_S = 0.75
 PASSIVE_SAFE_RELEASE_POLL_S = 0.05
@@ -1548,7 +1549,16 @@ class AsyncObserver:
                 logger.exception('Motion task failed while passive safety release was cancelling it')
 
     async def _release_passive_safety_slack(self, ema, limit):
-        high_lines = [int(i) for i in np.where(np.asarray(ema) >= self._passive_safety_release_threshold())[0]]
+        ema = np.asarray(ema, dtype=float)
+        high_lines = [int(i) for i in np.where(ema >= self._passive_safety_release_threshold())[0]]
+        if not high_lines and ema.size:
+            high_lines = [int(np.nanargmax(ema))]
+        release_lines = sorted({line_no for line_no in high_lines if 0 <= line_no < N_LINES})
+        pickup_lines = [
+            line_no
+            for line_no in range(N_LINES)
+            if line_no not in release_lines and ema[line_no] < self._passive_safety_release_reset_threshold()
+        ]
         await self._clear_passive_safety_motion()
         for key in list(self.active_set):
             self.input_velocities[key] = np.zeros(3)
@@ -1558,7 +1568,8 @@ class AsyncObserver:
 
         message = (
             f'Tension approached {limit:.1f} N on lines {high_lines}. '
-            'I stopped motion and am softly releasing 6 inches of slack on all four lines.'
+            f'I stopped motion, am softly releasing 6 inches on lines {release_lines}, '
+            f'and am asking lines {pickup_lines} to pick up about 1 inch of slack.'
         )
         logger.warning(message)
         self.send_ui(pop_message=telemetry.Popup(message=message))
@@ -1572,6 +1583,13 @@ class AsyncObserver:
         commanded_release_m = 0.0
         total_s = self._passive_safety_release_profile_duration()
         total_s = min(total_s, PASSIVE_SAFE_RELEASE_TIMEOUT_S)
+        pickup_scale = 0.0
+        if PASSIVE_SAFE_RELEASE_LENGTH_M > 0:
+            pickup_scale = float(np.clip(
+                PASSIVE_SAFE_PICKUP_LENGTH_M / PASSIVE_SAFE_RELEASE_LENGTH_M,
+                0.0,
+                1.0,
+            ))
         try:
             while elapsed_s < total_s and commanded_release_m < PASSIVE_SAFE_RELEASE_LENGTH_M:
                 current_tension = getattr(self.pe, 'tension', None)
@@ -1585,8 +1603,8 @@ class AsyncObserver:
                 if start_lengths is not None:
                     records = self._line_records_for_tension()
                     if records is not None:
-                        released_lengths = records[:, 1] - start_lengths
-                        if np.all(released_lengths >= PASSIVE_SAFE_RELEASE_LENGTH_M):
+                        released_lengths = records[release_lines, 1] - start_lengths[release_lines]
+                        if release_lines and np.all(released_lengths >= PASSIVE_SAFE_RELEASE_LENGTH_M):
                             break
 
                 next_elapsed_s = min(elapsed_s + PASSIVE_SAFE_RELEASE_POLL_S, total_s)
@@ -1597,8 +1615,14 @@ class AsyncObserver:
                     elapsed_s + (dt_s / 2.0),
                     total_s,
                 )
-                for line_no in range(N_LINES):
+                pickup_speed_mps = -speed_mps * pickup_scale
+                for line_no in release_lines:
                     await self.send_line_speed(line_no, speed_mps)
+                for line_no in pickup_lines:
+                    if current_tension is not None and current_tension[line_no] >= self._passive_safety_release_reset_threshold():
+                        await self.send_line_speed(line_no, 0)
+                        continue
+                    await self.send_line_speed(line_no, pickup_speed_mps)
                 commanded_release_m += speed_mps * dt_s
                 await asyncio.sleep(dt_s)
                 elapsed_s = next_elapsed_s

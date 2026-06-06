@@ -149,10 +149,11 @@ def test_passive_tension_limit_throttles_repeated_stop_popups(monkeypatch):
     asyncio.run(run())
 
 
-def test_passive_near_limit_releases_all_lines_with_velocity_ramp(monkeypatch):
+def test_passive_near_limit_releases_high_line_and_biases_other_lines(monkeypatch):
     async def run():
         observer = _observer()
         monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_LENGTH_M', 0.01)
+        monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_PICKUP_LENGTH_M', 0.002)
         monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_MAX_SPEED_MPS', 0.01)
         monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_RAMP_S', 0.2)
         monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_POLL_S', 0.05)
@@ -192,10 +193,20 @@ def test_passive_near_limit_releases_all_lines_with_velocity_ramp(monkeypatch):
         assert speeds[-1] < max(speeds)
         for batch in speed_batches:
             assert [line for line, _speed, _jog in batch] == [0, 1, 2, 3]
-            assert len({speed for _line, speed, _jog in batch}) == 1
+            assert batch[0][1] > 0
+            assert all(speed < 0 for _line, speed, _jog in batch[1:])
+            pickup_scale = (
+                observer_module.PASSIVE_SAFE_PICKUP_LENGTH_M
+                / observer_module.PASSIVE_SAFE_RELEASE_LENGTH_M
+            )
+            assert all(
+                np.isclose(abs(speed), batch[0][1] * pickup_scale)
+                for _line, speed, _jog in batch[1:]
+            )
         assert observer._passive_safety_release_armed is False
         popup = _popup_texts(observer)[0]
-        assert 'softly releasing 6 inches of slack on all four lines' in popup
+        assert 'softly releasing 6 inches on lines [0]' in popup
+        assert 'lines [1, 2, 3] to pick up about 1 inch of slack' in popup
 
     asyncio.run(run())
 
