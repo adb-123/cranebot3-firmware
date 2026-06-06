@@ -20,6 +20,15 @@ The particular robot details will be read from/saved to bedroom.conf
 
     stringman-headless --config=bedroom.conf
 
+Serve the local browser UI on the LAN from the same machine:
+
+    stringman-web-ui --host=0.0.0.0 --port=8080 --robot-uri=ws://127.0.0.1:4245
+
+Open the printed `http://<lan-ip>:8080` URL from any browser on the same LAN.
+The web UI serves the bundled `nf-viz` playroom, keeps the controller websocket
+on localhost, and exposes a LAN-safe raw protobuf websocket proxy for the
+browser. The simpler diagnostic page remains available at `/simple`.
+
 The stringman motion controller (stringman-headless) is the program which communicates with the robot components over wifi and acts as the central brain of a single robot. It must be running on the same network as the powered on anchors and gripper in order for the robot to be active and controllable. The main entrypoint is observer.py
 
 It listens on port 4245 for a connection from a UI or local AI policy. The UI can be opened at [neufangled.com/playroom](https://neufangled.com/playroom). Select LAN mode at first.
@@ -130,6 +139,20 @@ topic. Examples:
     ros2 topic pub --once /stringman/control/json std_msgs/msg/String "{data: '{\"jog_spool\":{\"is_gripper\":false,\"anchor_num\":0,\"speed\":0.01}}'}"
     ros2 topic pub --once /stringman/control/json std_msgs/msg/String "{data: '{\"move_gripper_to\":{\"x\":0.2,\"y\":0.1,\"z\":0.4}}'}"
     ros2 topic pub --once /stringman/control/json std_msgs/msg/String "{data: '{\"single_component_action\":{\"is_gripper\":true,\"action\":\"identify\"}}'}"
+
+### Calibration safety constraints
+
+Full calibration can use optional `calibrationSafety` settings in the robot
+config to adapt the Arpeggio probe size to the room, reject catch-risk no-go
+zones, and run a post-solve safe-motion validation before reporting success.
+See [`docs/calibration_safety.md`](docs/calibration_safety.md) and
+[`docs/calibration_safety_implementation.md`](docs/calibration_safety_implementation.md).
+
+Common setup commands:
+
+    calibration-safety-apply bedroom.conf --safety docs/calibration_safety.example.json --summary
+    calibration-safety-check bedroom.conf
+    calibration-artifact-summary logs/calibration/<session>.json
 
 ## Cloud telemetry relay
 
@@ -262,3 +285,39 @@ A self contained windows installer can be generated. The exact installation of s
 ## Support this project
 
 [Donate on Ko-fi](https://ko-fi.com/neufangled)
+
+## Dynamic-room calibration planning
+
+For cluttered rooms, generate one conservative `calibrationSafety` block before running calibration:
+
+```bash
+python scripts/plan_calibration_room.py \
+  --room-file docs/calibration_room.example.json \
+  --derive-line-endpoints-from-config path/to/config.json \
+  --overwrite-line-endpoints \
+  --hazards-from-artifact-dir logs/calibration \
+  --hazard-artifact-limit 1 \
+  --require-plan-quality usable \
+  --summary \
+  --svg-output room_plan.svg \
+  --output calibration_safety.generated.json
+```
+
+Apply the generated block to the robot config:
+
+```bash
+python scripts/apply_calibration_safety.py path/to/config.json \
+  --safety calibration_safety.generated.json \
+  --write
+```
+
+Restart the controller after updating config, then run calibration. If a run fails, inspect the newest `logs/calibration/*.json` with `scripts/summarize_calibration_artifact.py`, update the room file/no-go zones, regenerate `calibration_safety.generated.json`, and apply it again.
+
+Use `--include-plan-summary` when you want a single JSON file containing both `calibrationSafety` and `roomPlan` evidence. Use `--svg-output` for an operator preview of the room, no-go zones, selected probe center, probe diamond, line endpoints, and cable sweeps.
+
+External RGB room cameras can be added through the preserved
+`externalRoomCameras` config block and served by
+`stringman-external-camera-bridge`. See
+[`docs/external_room_cameras.md`](docs/external_room_cameras.md) for the
+multi-camera registry, self-calibration, fused map endpoints, and the MX Brio
+ROS domain 11 setup.

@@ -220,6 +220,7 @@ class CalibrationArtifactSession:
             "updated_at": self.updated_at,
             "phase": self.phase,
             "status": self.status,
+            "summary": self.summary(),
             "metadata": self.metadata,
             "status_history": self.status_history,
             "observations": self.observations,
@@ -234,6 +235,58 @@ class CalibrationArtifactSession:
             safe_payload.setdefault("warnings", [])
             safe_payload["warnings"].extend(warnings)
         return safe_payload
+
+    def summary(self) -> dict[str, Any]:
+        latest_failure = self.failures[-1] if self.failures else None
+        latest_warning = self.warnings[-1] if self.warnings else None
+        latest_line_health = self.line_health_samples[-1] if self.line_health_samples else None
+        failed_optimizers = [
+            report.get("name")
+            for report in self.optimizer_reports
+            if report.get("success") is False
+        ]
+        hazards = [
+            failure.get("hazard")
+            for failure in self.failures
+            if isinstance(failure.get("hazard"), dict)
+        ]
+        hazards.extend(
+            observation.get("hazard")
+            for observation in self.observations
+            if observation.get("kind") == "calibration_hazard"
+            and isinstance(observation.get("hazard"), dict)
+        )
+        fatal_hazards = [hazard for hazard in hazards if hazard.get("fatal", True)]
+        recoverable_hazards = [hazard for hazard in hazards if not hazard.get("fatal", True)]
+        high_tension_lines = []
+        line_tension_profiles = []
+        stale_or_invalid_line_health = False
+        if latest_line_health is not None:
+            high_tension_lines = latest_line_health.get("high_tension_lines") or []
+            line_tension_profiles = latest_line_health.get("line_tension_profiles") or []
+            stale_or_invalid_line_health = latest_line_health.get("valid") is False
+
+        return {
+            "phase": self.phase,
+            "status": self.status,
+            "failure_count": len(self.failures),
+            "warning_count": len(self.warnings),
+            "observation_count": len(self.observations),
+            "line_health_sample_count": len(self.line_health_samples),
+            "optimizer_report_count": len(self.optimizer_reports),
+            "latest_failure": latest_failure,
+            "latest_warning": latest_warning,
+            "latest_line_health_kind": (
+                latest_line_health.get("kind") if latest_line_health is not None else None
+            ),
+            "hazard_count": len(hazards),
+            "fatal_hazard_count": len(fatal_hazards),
+            "recoverable_hazard_count": len(recoverable_hazards),
+            "high_tension_lines": high_tension_lines,
+            "line_tension_profiles": line_tension_profiles,
+            "stale_or_invalid_line_health": stale_or_invalid_line_health,
+            "failed_optimizers": failed_optimizers,
+        }
 
     def write(self, status: str | None = None, message: str | None = None) -> Path:
         if status is not None:

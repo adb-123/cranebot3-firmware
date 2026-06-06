@@ -1,5 +1,4 @@
 import asyncio
-import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,8 +6,9 @@ import numpy as np
 from nf_robot.host import observer as observer_module
 from nf_robot.host.observer import (
     AsyncObserver,
+    PASSIVE_SAFE_RELEASE_MARGIN_N,
+    PASSIVE_SAFE_RELEASE_RESET_MARGIN_N,
     PASSIVE_SAFE_TENSION_N,
-    PASSIVE_SAFE_TENSION_RETRY_BUMP_N,
 )
 
 
@@ -17,12 +17,14 @@ def _observer():
     observer.input_velocities = {'default': np.zeros(3)}
     observer.active_set = {'default'}
     observer.swing_cancellation_task = None
-    observer.last_retryable_move = None
+    observer.motion_task = None
     observer._passive_safety_tension_limit_extra_until = 0.0
-    observer._passive_safety_retry_history = {}
+    observer._passive_safety_release_armed = True
     observer._passive_safety_last_final_prompt_ts = 0.0
     observer.pe = SimpleNamespace(gant_pos=np.zeros(3))
+    observer.run_command_loop = True
     observer.ui_messages = []
+    observer.line_commands = []
     observer.stop_calls = 0
     observer.disable_calls = 0
     observer.enable_calls = 0
@@ -44,9 +46,14 @@ def _observer():
         observer.retry_calls.append((args, kwargs))
         return np.asarray(args[0], dtype=float)
 
+    async def send_line_speed(line_no, speed, jog=False):
+        observer.line_commands.append((line_no, speed, jog))
+
     observer._handle_disable_torque = disable_torque
     observer._handle_enable_torque = enable_torque
     observer.move_direction_speed = retry_move
+    observer.send_line_speed = send_line_speed
+    observer._line_records_for_tension = lambda max_age_s=0: None
     return observer
 
 
@@ -58,46 +65,24 @@ def _popup_texts(observer):
     ]
 
 
-def test_record_retryable_move_only_keeps_default_nonzero_motion():
-    observer = _observer()
-
-    observer._record_retryable_move('swingc', np.array([0.2, 0.0, 0.0]))
-    assert observer.last_retryable_move is None
-
-    observer._record_retryable_move('default', np.zeros(3))
-    assert observer.last_retryable_move is None
-
-    observer._record_retryable_move('default', np.array([0.2, 0.0, -0.01]))
-
-    assert observer.last_retryable_move['key'] == 'default'
-    np.testing.assert_allclose(
-        observer.last_retryable_move['velocity'],
-        np.array([0.2, 0.0, -0.01]),
-    )
-
-
-def test_passive_tension_limit_backs_off_bumps_limit_and_retries_once(monkeypatch):
+def test_passive_tension_limit_stops_without_retry(monkeypatch):
     async def run():
         observer = _observer()
-        observer._record_retryable_move('default', np.array([0.1, 0.0, 0.0]))
 
         ok = await observer._handle_passive_tension_limit(
             np.array([17.2, 2.0, 2.0, 2.0]),
             PASSIVE_SAFE_TENSION_N,
         )
 
-        assert ok is True
+        assert ok is False
         assert observer.stop_calls == 1
         assert observer.disable_calls == 1
         assert observer.enable_calls == 1
-        assert observer._passive_safety_tension_limit_extra_until > time.time()
-        assert len(observer._passive_safety_retry_history) == 1
-        assert len(observer.retry_calls) == 1
-        args, kwargs = observer.retry_calls[0]
-        np.testing.assert_allclose(args[0], np.array([0.1, 0.0, 0.0]))
-        assert kwargs['key'] == 'default'
-        assert kwargs['record_retry'] is False
-        assert 'temporarily raised the retry limit to 17.5 N' in _popup_texts(observer)[0]
+        assert observer._passive_safety_tension_limit_extra_until == 0.0
+        assert observer.retry_calls == []
+        popup = _popup_texts(observer)[0]
+        assert 'without retrying the same move' in popup
+        assert 'temporarily raised the retry limit' not in popup
 
     async def fast_sleep(_delay):
         return None
@@ -106,15 +91,14 @@ def test_passive_tension_limit_backs_off_bumps_limit_and_retries_once(monkeypatc
     asyncio.run(run())
 
 
-def test_second_tension_trip_during_retry_window_stops_without_repeat_retry(monkeypatch):
+def test_passive_tension_limit_clears_stale_retry_window_without_retry(monkeypatch):
     async def run():
         observer = _observer()
-        observer._record_retryable_move('default', np.array([0.1, 0.0, 0.0]))
-        observer._passive_safety_tension_limit_extra_until = time.time() + 1.0
+        observer._passive_safety_tension_limit_extra_until = 9999999999.0
 
         ok = await observer._handle_passive_tension_limit(
             np.array([18.0, 2.0, 2.0, 2.0]),
-            PASSIVE_SAFE_TENSION_N + PASSIVE_SAFE_TENSION_RETRY_BUMP_N,
+            PASSIVE_SAFE_TENSION_N,
         )
 
         assert ok is False
@@ -122,8 +106,7 @@ def test_second_tension_trip_during_retry_window_stops_without_repeat_retry(monk
         assert observer.retry_calls == []
         assert observer._passive_safety_tension_limit_extra_until == 0.0
         popup = _popup_texts(observer)[0]
-        assert 'stayed above 17.5 N during the retry' in popup
-        assert 'Check for a caught line' in popup
+        assert 'without retrying the same move' in popup
 
     async def fast_sleep(_delay):
         return None
@@ -132,13 +115,22 @@ def test_second_tension_trip_during_retry_window_stops_without_repeat_retry(monk
     asyncio.run(run())
 
 
-def test_retry_cooldown_prevents_repeating_same_last_move(monkeypatch):
+def test_passive_safety_tension_limit_is_not_bumped():
+    observer = _observer()
+    observer._passive_safety_tension_limit_extra_until = 9999999999.0
+
+    assert observer._passive_safety_tension_limit() == PASSIVE_SAFE_TENSION_N
+    assert observer._passive_safety_release_threshold() == (
+        PASSIVE_SAFE_TENSION_N - PASSIVE_SAFE_RELEASE_MARGIN_N
+    )
+    assert observer._passive_safety_release_reset_threshold() == (
+        PASSIVE_SAFE_TENSION_N - PASSIVE_SAFE_RELEASE_RESET_MARGIN_N
+    )
+
+
+def test_passive_tension_limit_throttles_repeated_stop_popups(monkeypatch):
     async def run():
         observer = _observer()
-        observer._record_retryable_move('default', np.array([0.1, 0.0, 0.0]))
-        observer._passive_safety_retry_history[
-            observer.last_retryable_move['signature']
-        ] = time.time()
 
         ok = await observer._handle_passive_tension_limit(
             np.array([17.2, 2.0, 2.0, 2.0]),
@@ -148,10 +140,112 @@ def test_retry_cooldown_prevents_repeating_same_last_move(monkeypatch):
         assert ok is False
         assert observer.retry_calls == []
         popup = _popup_texts(observer)[0]
-        assert 'Check the lines, then retry manually' in popup
+        assert 'Check the lines before moving again' in popup
 
     async def fast_sleep(_delay):
         return None
 
     monkeypatch.setattr(observer_module.asyncio, 'sleep', fast_sleep)
+    asyncio.run(run())
+
+
+def test_passive_near_limit_releases_all_lines_with_velocity_ramp(monkeypatch):
+    async def run():
+        observer = _observer()
+        monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_LENGTH_M', 0.01)
+        monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_MAX_SPEED_MPS', 0.01)
+        monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_RAMP_S', 0.2)
+        monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_POLL_S', 0.05)
+        monkeypatch.setattr(observer_module, 'PASSIVE_SAFE_RELEASE_TIMEOUT_S', 2.0)
+
+        async def fast_sleep(_delay):
+            return None
+
+        monkeypatch.setattr(observer_module.asyncio, 'sleep', fast_sleep)
+
+        observer.input_velocities = {
+            'default': np.array([0.1, 0.2, 0.3]),
+            'swingc': np.array([0.2, 0.0, 0.0]),
+        }
+        observer.active_set = {'default', 'swingc'}
+
+        ok = await observer._release_passive_safety_slack(
+            np.array([PASSIVE_SAFE_TENSION_N - PASSIVE_SAFE_RELEASE_MARGIN_N, 2.0, 2.0, 2.0]),
+            PASSIVE_SAFE_TENSION_N,
+        )
+
+        assert ok is False
+        assert observer.stop_calls == 1
+        assert observer.disable_calls == 0
+        assert observer.enable_calls == 0
+        assert observer.active_set == {'default'}
+        assert all(np.allclose(value, np.zeros(3)) for value in observer.input_velocities.values())
+        assert observer.line_commands[-4:] == [(0, 0, False), (1, 0, False), (2, 0, False), (3, 0, False)]
+        assert all(jog is False for _line, _speed, jog in observer.line_commands)
+        speed_batches = [
+            observer.line_commands[i:i + 4]
+            for i in range(0, len(observer.line_commands) - 4, 4)
+        ]
+        speeds = [batch[0][1] for batch in speed_batches]
+        assert speeds[0] < speeds[1] < speeds[2]
+        assert max(speeds) <= observer_module.PASSIVE_SAFE_RELEASE_MAX_SPEED_MPS
+        assert speeds[-1] < max(speeds)
+        for batch in speed_batches:
+            assert [line for line, _speed, _jog in batch] == [0, 1, 2, 3]
+            assert len({speed for _line, speed, _jog in batch}) == 1
+        assert observer._passive_safety_release_armed is False
+        popup = _popup_texts(observer)[0]
+        assert 'softly releasing 6 inches of slack on all four lines' in popup
+
+    asyncio.run(run())
+
+
+def test_passive_safety_releases_once_until_tension_resets(monkeypatch):
+    async def run():
+        observer = _observer()
+        observer._passive_safety_release_armed = False
+        observer.pe.tension = np.array([
+            (PASSIVE_SAFE_TENSION_N - PASSIVE_SAFE_RELEASE_MARGIN_N) * 10,
+            0.0,
+            0.0,
+            0.0,
+        ])
+
+        async def stop_after_first_loop(_delay):
+            observer.run_command_loop = False
+
+        monkeypatch.setattr(observer_module.asyncio, 'sleep', stop_after_first_loop)
+        await observer.passive_safety()
+
+        assert observer.line_commands == []
+        assert observer.stop_calls == 0
+        assert observer._passive_safety_release_armed is False
+
+        observer.run_command_loop = True
+        observer.pe.tension = np.zeros(4)
+        await observer.passive_safety()
+
+        assert observer._passive_safety_release_armed is True
+
+    asyncio.run(run())
+
+
+def test_passive_safety_over_limit_hard_stop_does_not_release_slack(monkeypatch):
+    async def run():
+        observer = _observer()
+        observer.pe.tension = np.array([(PASSIVE_SAFE_TENSION_N + 1.0) * 10, 0.0, 0.0, 0.0])
+
+        async def fast_sleep(_delay):
+            observer.run_command_loop = False
+
+        monkeypatch.setattr(observer_module.asyncio, 'sleep', fast_sleep)
+        await observer.passive_safety()
+
+        assert observer.stop_calls == 1
+        assert observer.disable_calls == 1
+        assert observer.enable_calls == 1
+        assert observer.line_commands == []
+        popup = _popup_texts(observer)[0]
+        assert 'Tension exceeded 17.0 N' in popup
+
     asyncio.run(run())

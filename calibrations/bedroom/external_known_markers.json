@@ -1,0 +1,50 @@
+{
+  "createdAt": "2026-06-05T19:55:00-07:00",
+  "source": "Averaged live wall-camera RGB solve from anchor_0 and anchor_1 using bedroom.conf cameraCal.",
+  "markers": {
+    "cal_assist_3": {
+      "pose": {
+        "rotation": [
+          -0.01896822237194549,
+          0.006689632080290398,
+          0.17518150765498053
+        ],
+        "position": [
+          0.3283593764567585,
+          0.625937515889794,
+          -0.02549253524872319
+        ]
+      },
+      "sourceEvidence": {
+        "sampleCount": 2,
+        "maxResidualM": 0.05744524192066976,
+        "sources": [
+          {
+            "camera": "anchor_0",
+            "centerPx": [
+              783.4126434326172,
+              568.2478179931641
+            ],
+            "position": [
+              0.31906043457221833,
+              0.6826026218002026,
+              -0.02389526529208119
+            ]
+          },
+          {
+            "camera": "anchor_1",
+            "centerPx": [
+              672.0289764404297,
+              523.5713882446289
+            ],
+            "position": [
+              0.33765831834129867,
+              0.5692724099793853,
+              -0.02708980520536519
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

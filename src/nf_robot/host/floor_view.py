@@ -36,15 +36,17 @@ def generate_orthographic_floor_maps(
     combined_bgr = np.ones((map_size_px, map_size_px, 3), dtype=np.float64)
     touched = np.zeros((map_size_px, map_size_px, 1), dtype=bool)
 
-    # Extract calibration matrices once
-    K = np.array(camera_cal.intrinsic_matrix).reshape((3, 3))
-    D = np.array(camera_cal.distortion_coeff)
-    orig_w = camera_cal.resolution.width
-    orig_h = camera_cal.resolution.height
-    
     for i, client in enumerate(valid_anchor_clients):
         bgr_image = client.last_frame_resized
         heatmap = heatmaps_np[i]
+        client_camera_cal = getattr(client, "camera_cal", None) or camera_cal
+        if client_camera_cal is None:
+            raise ValueError("camera calibration is required for orthographic floor projection")
+
+        K = np.array(client_camera_cal.intrinsic_matrix).reshape((3, 3))
+        D = np.array(client_camera_cal.distortion_coeff)
+        orig_w = client_camera_cal.resolution.width
+        orig_h = client_camera_cal.resolution.height
         
         h, w = bgr_image.shape[:2]
         
@@ -128,6 +130,3 @@ class FloorView:
 
     def stop(self):
         pass
-
-
-    

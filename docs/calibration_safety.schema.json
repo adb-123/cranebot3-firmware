@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neufangled.com/schemas/stringman/calibration-safety.schema.json",
+  "title": "Stringman calibrationSafety",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["full", "constrained", "manual_assisted"],
+      "default": "full"
+    },
+    "calibrationMode": {
+      "type": "string",
+      "enum": ["full", "constrained", "manual_assisted"]
+    },
+    "calibration_mode": {
+      "type": "string",
+      "enum": ["full", "constrained", "manual_assisted"]
+    },
+    "safeProbeCenter": {
+      "$ref": "#/$defs/point2"
+    },
+    "safe_probe_center": {
+      "$ref": "#/$defs/point2"
+    },
+    "calibrationCenter": {
+      "$ref": "#/$defs/point2"
+    },
+    "calibration_center": {
+      "$ref": "#/$defs/point2"
+    },
+    "lineEndpoints": {
+      "$ref": "#/$defs/points"
+    },
+    "line_endpoints": {
+      "$ref": "#/$defs/points"
+    },
+    "cableEndpoints": {
+      "$ref": "#/$defs/points"
+    },
+    "cable_endpoints": {
+      "$ref": "#/$defs/points"
+    },
+    "calibrationZone": {
+      "$ref": "#/$defs/polygon"
+    },
+    "calibration_zone": {
+      "$ref": "#/$defs/polygon"
+    },
+    "safeProbeZone": {
+      "$ref": "#/$defs/polygon"
+    },
+    "safe_probe_zone": {
+      "$ref": "#/$defs/polygon"
+    },
+    "safeZone": {
+      "$ref": "#/$defs/polygon"
+    },
+    "safe_zone": {
+      "$ref": "#/$defs/polygon"
+    },
+    "noGoZones": {
+      "$ref": "#/$defs/zones"
+    },
+    "no_go_zones": {
+      "$ref": "#/$defs/zones"
+    },
+    "catchRiskObjects": {
+      "$ref": "#/$defs/zones"
+    },
+    "catch_risk_objects": {
+      "$ref": "#/$defs/zones"
+    },
+    "obstacles": {
+      "$ref": "#/$defs/zones"
+    },
+    "maxProbeHalfWidthM": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "max_probe_half_width_m": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "maxProbeHalfHeightM": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "max_probe_half_height_m": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "minProbeHalfWidthM": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "min_probe_half_width_m": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "minProbeHalfHeightM": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "min_probe_half_height_m": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "obstacleMarginM": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "obstacle_margin_m": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "hazardAvoidRadiusM": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "hazard_avoid_radius_m": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "validationDistanceM": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "validation_distance_m": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "validationSpeedMps": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "validation_speed_mps": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "validationSettleS": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "validation_settle_s": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "manualAssistTimeoutS": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "manual_assist_timeout_s": {
+      "$ref": "#/$defs/nonNegativeNumber"
+    },
+    "allowDegradedReference": {
+      "type": "boolean",
+      "default": false
+    },
+    "allow_degraded_reference": {
+      "type": "boolean"
+    },
+    "skipSafeMotionValidation": {
+      "type": "boolean",
+      "default": false
+    },
+    "skip_safe_motion_validation": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "point2": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "polygon": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "$ref": "#/$defs/point2"
+      }
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/point2"
+      }
+    },
+    "rect": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/point2"
+      }
+    },
+    "zone": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/polygon"
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "polygon": {
+              "$ref": "#/$defs/polygon"
+            },
+            "points": {
+              "$ref": "#/$defs/polygon"
+            },
+            "rect": {
+              "$ref": "#/$defs/rect"
+            },
+            "rectangle": {
+              "$ref": "#/$defs/rect"
+            },
+            "bounds": {
+              "$ref": "#/$defs/rect"
+            },
+            "center": {
+              "$ref": "#/$defs/point2"
+            },
+            "radiusM": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "radius_m": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "radius": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "marginM": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "margin_m": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "margin": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          },
+          "anyOf": [
+            { "required": ["polygon"] },
+            { "required": ["points"] },
+            { "required": ["rect"] },
+            { "required": ["rectangle"] },
+            { "required": ["bounds"] },
+            { "required": ["center", "radiusM"] },
+            { "required": ["center", "radius_m"] },
+            { "required": ["center", "radius"] }
+          ]
+        }
+      ]
+    },
+    "zones": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/zone"
+      }
+    }
+  }
+}

@@ -73,15 +73,22 @@ observability-test = [
 component-server = "nf_robot.robot.component_server:main"
 stringman-headless = "nf_robot.host.observer:main"
 stringman-ros2-adapter = "nf_robot.ros2_adapter:main"
+stringman-web-ui = "nf_robot.host.web_ui:main"
+stringman-external-camera-bridge = "nf_robot.host.external_camera_bridge:main"
 
 # QA Tools
 qa-anchor = "nf_robot.qa.anchor_eval:main"
 qa-gripper = "nf_robot.qa.gripper_eval:main"
 qa-gripper-arp = "nf_robot.qa.gripper_arp_eval:main"
+calibration-safety-check = "nf_robot.host.calibration_safety_cli:main"
+calibration-artifact-summary = "nf_robot.host.calibration_artifact_cli:main"
+calibration-safety-apply = "nf_robot.host.calibration_safety_apply_cli:main"
+calibration-room-plan = "nf_robot.host.calibration_room_cli:main"
 
 [tool.setuptools.package-data]
 "nf_robot.scripts" = ["*.sh"]
 "nf_robot.protos" = ["protos/*"]
+"nf_robot.ui" = ["assets/*", "assets/assets/*", "assets/assets/models/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -22,6 +22,7 @@ default_anchor_conf = {
     # speed to reel in when the 'tighten' command is received. Meters of line per second
     'TIGHTENING_SPEED': -0.12,
     'TIGHTEN_DESIRED_TENSION_N': 1.38,
+    'TIGHTEN_MAX_DESIRED_TENSION_N': 20.0,
     'TIGHTEN_MAX_RETRIES': 5,
     'TIGHTEN_ATTEMPT_TIMEOUT_S': 8.0,
     'TIGHTEN_MONITOR_DURATION_S': 3.0,
@@ -82,8 +83,8 @@ class AnchorArpServer(RobotComponentServer):
 
     async def processOtherUpdates(self, updates, tg):
         if 'tighten' in updates:
-            spool_no = updates['tighten']
-            tg.create_task(self.tighten(spool_no))
+            spool_no, target_tension_n = self._parse_tighten_request(updates['tighten'])
+            tg.create_task(self.tighten(spool_no, target_tension_n=target_tension_n))
         if 'stow' in updates:
             spool_no = updates['stow']
             tg.create_task(self.stow(spool_no))
@@ -157,7 +158,7 @@ class AnchorArpServer(RobotComponentServer):
             for spool in self.spools
         ])
 
-    async def tighten(self, spool_no):
+    async def tighten(self, spool_no, target_tension_n=None):
         """
         Pulls in the line until tight. If the line slips within 3 seconds,
         it reduces the speed by 30% and retries, up to 5 times.
@@ -165,6 +166,7 @@ class AnchorArpServer(RobotComponentServer):
         spool_no = self._parse_spool_no(spool_no, 'tighten')
         if spool_no is None:
             return False
+        target_tension_n = self._target_tension_n(target_tension_n)
 
         max_retries = int(self.conf['TIGHTEN_MAX_RETRIES'])
         monitoring_duration_s = float(self.conf['TIGHTEN_MONITOR_DURATION_S'])
@@ -177,12 +179,14 @@ class AnchorArpServer(RobotComponentServer):
                     'tighten', spool_no, 'running',
                     phase='pulling',
                     attempt=attempt,
-                    speed=current_speed)
+                    speed=current_speed,
+                    target_tension_n=target_tension_n)
                 reached_tension, reason = await self._wait_for_tension(
                     spool_no,
                     'tighten',
                     current_speed,
-                    float(self.conf['TIGHTEN_ATTEMPT_TIMEOUT_S']))
+                    float(self.conf['TIGHTEN_ATTEMPT_TIMEOUT_S']),
+                    target_tension_n=target_tension_n)
                 self._stop_spool(spool_no)
 
                 if not reached_tension:
@@ -195,12 +199,14 @@ class AnchorArpServer(RobotComponentServer):
                 self._publish_line_action(
                     'tighten', spool_no, 'running',
                     phase='monitoring',
-                    attempt=attempt)
+                    attempt=attempt,
+                    target_tension_n=target_tension_n)
                 if await self._monitor_tension_held(spool_no, monitoring_duration_s):
                     self._publish_line_action(
                         'tighten', spool_no, 'succeeded',
                         reason='tension_held',
-                        attempt=attempt)
+                        attempt=attempt,
+                        target_tension_n=target_tension_n)
                     return True
 
                 self._publish_line_action(
@@ -381,6 +387,27 @@ class AnchorArpServer(RobotComponentServer):
         except (AttributeError, TypeError, ValueError):
             return None
 
+    def _parse_tighten_request(self, request):
+        target_tension_n = None
+        spool_no = request
+        if isinstance(request, dict):
+            spool_no = request.get('spool', request.get('spool_no'))
+            target_tension_n = request.get('target_tension_n', request.get('targetTensionN'))
+        elif isinstance(request, (list, tuple)) and len(request) == 2:
+            spool_no, target_tension_n = request
+        return spool_no, target_tension_n
+
+    def _target_tension_n(self, target_tension_n=None):
+        default = float(self.conf['TIGHTEN_DESIRED_TENSION_N'])
+        max_target = float(self.conf.get('TIGHTEN_MAX_DESIRED_TENSION_N', default))
+        if target_tension_n is None:
+            return default
+        try:
+            target = float(target_tension_n)
+        except (TypeError, ValueError):
+            return default
+        return max(default, min(target, max_target))
+
     def _line_state_available(self, length, tension):
         return length is not None or tension is not None
 
@@ -393,13 +420,13 @@ class AnchorArpServer(RobotComponentServer):
                 return True
         return False
 
-    def _line_is_slack(self, spool_no):
+    def _line_is_slack(self, spool_no, target_tension_n=None):
         tension = self._line_float(self.spools[spool_no], 'last_tension')
         if tension is None:
             return True
-        return tension < float(self.conf['TIGHTEN_DESIRED_TENSION_N'])
+        return tension < self._target_tension_n(target_tension_n)
 
-    async def _wait_for_tension(self, spool_no, action, speed, timeout_s):
+    async def _wait_for_tension(self, spool_no, action, speed, timeout_s, target_tension_n=None):
         spool = self.spools[spool_no]
         deadline = time.monotonic() + timeout_s
         last_change_at = time.monotonic()
@@ -408,7 +435,7 @@ class AnchorArpServer(RobotComponentServer):
         check_interval_s = float(self.conf['LINE_ACTION_CHECK_INTERVAL_S'])
         stale_timeout_s = float(self.conf['LINE_ACTION_STALE_TIMEOUT_S'])
 
-        while self._line_is_slack(spool_no):
+        while self._line_is_slack(spool_no, target_tension_n=target_tension_n):
             if time.monotonic() >= deadline:
                 return False, 'tension_timeout'
 

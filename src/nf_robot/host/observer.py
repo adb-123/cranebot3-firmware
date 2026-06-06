@@ -8,6 +8,7 @@ import socket
 import asyncio
 import argparse
 import logging
+import math
 import os
 from zeroconf import IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import (
@@ -29,7 +30,6 @@ from collections import deque, defaultdict
 import uuid
 import websockets
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
-from functools import partial
 from pathlib import Path
 import json
 import re
@@ -75,7 +75,7 @@ def configure_worker_process():
 
 configure_native_thread_pools(configure_torch=False)
 
-from nf_robot.common.pose_functions import compose_poses
+from nf_robot.common.pose_functions import compose_poses, gantry_april_inv
 from nf_robot.common.cv_common import *
 from nf_robot.common.config_loader import *
 import nf_robot.common.definitions as model_constants
@@ -111,14 +111,57 @@ TENSION_WAIT_TIMEOUT_S = 10.0
 TENSION_POLL_INTERVAL_S = 0.1
 TENSION_SPEED_NORM_THRESHOLD = 0.01  # m/s
 TENSION_RECORD_MAX_AGE_S = 2.0
+CAL_TENSION_RECOVERY_ATTEMPTS = 2
+CAL_TENSION_RECOVERY_PAUSE_S = 0.5
+CAL_TENSION_TARGET_STEP_N = 1.0
+CAL_TENSION_TARGET_MAX_N = 20.0
 REFERENCE_VISUAL_MAX_AGE_S = 2.0
 CAL_DIAMOND_MIN_HALF_HEIGHT = 0.02
 CAL_DIAMOND_MIN_HALF_WIDTH = 0.05
+CAL_DIAMOND_SHRINK_FACTOR = 0.75
+CAL_REFERENCE_REACQUIRE_TIMEOUT_S = 5.0
+CAL_REFERENCE_REACQUIRE_POLL_S = 0.1
+CAL_DEFAULT_OBSTACLE_MARGIN_M = 0.08
+CAL_CABLE_SWEEP_SAMPLE_M = 0.05
+CAL_HAZARD_AVOID_RADIUS_M = 0.35
+CAL_HEALTH_MIN_SCORE = 70
+CAL_SAFE_VALIDATION_DISTANCE_M = 0.04
+CAL_SAFE_VALIDATION_SPEED_MPS = 0.03
+CAL_SAFE_VALIDATION_SETTLE_S = 0.35
+CAL_ENVELOPE_RETURN_Z_MARGIN_M = 0.03
+CAL_ENVELOPE_RETURN_SPEED_MPS = 0.03
+CAL_ENVELOPE_RETURN_SETTLE_S = 0.35
+CAL_TENSION_BALANCE_STEP_M = 0.025
+CAL_TENSION_BALANCE_SPEED_MPS = 0.025
+CAL_TENSION_BALANCE_SETTLE_S = 0.35
+CAL_TENSION_BALANCE_ERROR_CLIP_N = 5.0
+CAL_TENSION_BALANCE_ERROR_DEADBAND_N = 0.2
+CAL_TENSION_RESPONSE_MIN_LENGTH_DELTA_M = 0.01
+CAL_TENSION_RESPONSE_MIN_TENSION_DELTA_N = 0.25
+CAL_TENSION_PROFILE_PROBE_WAIT_S = 3.0
+CAL_TENSION_PROFILE_PROBE_POLL_S = 0.05
+CAL_TENSION_PROFILE_SETTLE_S = 0.35
+CAL_TENSION_PROFILE_PROBE_SPEED_MPS = -0.08
+CAL_TENSION_PROFILE_LOW_MARGIN_N = 0.15
+CAL_TENSION_PROFILE_SAFE_MARGIN_N = 1.0
+CAL_TENSION_HIGH_FRICTION_N = 6.0
+CAL_SPIN_STAGE_MAX_STEPS = 8
+CAL_SPIN_STAGE_SPEED_MPS = 0.025
+CAL_SPIN_STAGE_PULSE_S = 0.9
+CAL_SPIN_STAGE_SETTLE_S = 0.25
+CAL_SPIN_STAGE_MIN_IMPROVEMENT = 0.003
+CAL_SPIN_STAGE_GRIPPER_CHECK_S = 0.6
+CAL_SPIN_STAGE_ZONE_TOLERANCE_M = 0.10
+CAL_SPIN_STAGE_PARTIAL_MAX_STEPS = 4
+CAL_SPIN_STAGE_PARTIAL_PULSE_S = 1.2
 PASSIVE_SAFE_TENSION_N = 17.0
-PASSIVE_SAFE_TENSION_RETRY_BUMP_N = 0.5
-PASSIVE_SAFE_RETRY_WINDOW_S = 3.0
-PASSIVE_SAFE_RETRY_MOVE_MAX_AGE_S = 5.0
-PASSIVE_SAFE_RETRY_COOLDOWN_S = 10.0
+PASSIVE_SAFE_RELEASE_MARGIN_N = 0.5
+PASSIVE_SAFE_RELEASE_RESET_MARGIN_N = 1.5
+PASSIVE_SAFE_RELEASE_LENGTH_M = 0.1524
+PASSIVE_SAFE_RELEASE_MAX_SPEED_MPS = 0.035
+PASSIVE_SAFE_RELEASE_RAMP_S = 0.75
+PASSIVE_SAFE_RELEASE_POLL_S = 0.05
+PASSIVE_SAFE_RELEASE_TIMEOUT_S = 6.0
 INFO_REQUEST_TIMEOUT_MS = 3000 # milliseconds
 CONTROL_PLANE_PRODUCTION = "wss://neufangled.com"
 CONTROL_PLANE_STAGING = "wss://nf-site-monolith-staging-690802609278.us-east1.run.app"
@@ -143,6 +186,22 @@ CLOSED = 90
 
 POLE = np.array([0,0,0.5334])
 GRIPPER_HEIGHT_OVER_TARGET = np.array([0,0,0.3])
+DEFAULT_REACHABLE_MARKER_NAMES = {
+    'gamepad',
+    'gamepad_back',
+    'hamper',
+    'hamper_back',
+    'trash',
+    'trash_back',
+}
+REACHABLE_MARKER_ALIASES = {
+    'controller': 'gamepad',
+    'game_controller': 'gamepad',
+    'trash_can': 'trash',
+    'trashcan': 'trash',
+    'trask': 'trash',
+    'trask_can': 'trash',
+}
 
 def capture_gripper_image(ndimage, gripper_occupied=False):
     """
@@ -271,10 +330,14 @@ class AsyncObserver:
         # dict of vectors representing last velocities commanded by different subsystems. all keys in active_set are summard
         self.input_velocities = {'default': np.zeros(3)}
         self.active_set = set(['default'])
-        self.last_retryable_move = None
         self._passive_safety_tension_limit_extra_until = 0.0
-        self._passive_safety_retry_history = {}
+        self._passive_safety_release_armed = True
         self._passive_safety_last_final_prompt_ts = 0.0
+        self._calibration_active = False
+        self._calibration_line_tension_profiles = None
+        self._last_reference_reset_degraded = False
+        self._calibration_degraded_reference_count = 0
+        self.calibration_hazards = deque(maxlen=128)
         self.run_ai = run_ai
         self.run_ortho = run_ortho
         self.auto_start = auto_start
@@ -1024,6 +1087,8 @@ class AsyncObserver:
             r = await self.invoke_motion_task(self.collect_arp_anchor_eyelet_experiment_data())
         if item.action == 'stow':
             r = await self.stow_lines()
+        if item.action in ('tension_profiles', 'line_tension_profiles'):
+            r = await self.invoke_motion_task(self.run_line_tension_profile_diagnostic())
         if item.action.startswith('swinglatency '):
             parts = item.action.split(' ')
             self.config.swing_latency = min(max(float(parts[1]), 0.0), 0.8)
@@ -1417,42 +1482,130 @@ class AsyncObserver:
         self.last_user_move_time = time.time()
 
     def _passive_safety_tension_limit(self, now=None):
-        now = time.time() if now is None else now
-        extra = PASSIVE_SAFE_TENSION_RETRY_BUMP_N if now < getattr(self, '_passive_safety_tension_limit_extra_until', 0.0) else 0.0
-        return PASSIVE_SAFE_TENSION_N + extra
+        return PASSIVE_SAFE_TENSION_N
 
-    def _retryable_move_signature(self, key, velocity):
-        velocity = np.asarray(velocity, dtype=float)
-        return (key, tuple(np.round(velocity, 3)))
+    def _passive_safety_release_threshold(self):
+        return self._passive_safety_tension_limit() - PASSIVE_SAFE_RELEASE_MARGIN_N
 
-    def _record_retryable_move(self, key, velocity):
-        if key != 'default':
-            return
-        velocity = np.asarray(velocity, dtype=float)
-        if velocity.shape != (3,) or not np.all(np.isfinite(velocity)):
-            return
-        if float(np.linalg.norm(velocity)) < 0.005:
-            return
-        signature = self._retryable_move_signature(key, velocity)
-        self.last_retryable_move = {
-            'key': key,
-            'velocity': velocity.copy(),
-            'signature': signature,
-            'ts': time.time(),
-        }
+    def _passive_safety_release_reset_threshold(self):
+        return self._passive_safety_tension_limit() - PASSIVE_SAFE_RELEASE_RESET_MARGIN_N
 
-    def _get_passive_safety_retry_move(self, now=None):
-        now = time.time() if now is None else now
-        move = getattr(self, 'last_retryable_move', None)
-        if not move:
-            return None
-        if now - move.get('ts', 0.0) > PASSIVE_SAFE_RETRY_MOVE_MAX_AGE_S:
-            return None
-        history = getattr(self, '_passive_safety_retry_history', {})
-        last_retry = history.get(move['signature'], 0.0)
-        if now - last_retry < PASSIVE_SAFE_RETRY_COOLDOWN_S:
-            return None
-        return move
+    def _passive_safety_release_profile_duration(
+        self,
+        release_length_m=None,
+        max_speed_mps=None,
+        ramp_s=None,
+    ):
+        release_length_m = PASSIVE_SAFE_RELEASE_LENGTH_M if release_length_m is None else release_length_m
+        max_speed_mps = PASSIVE_SAFE_RELEASE_MAX_SPEED_MPS if max_speed_mps is None else max_speed_mps
+        ramp_s = PASSIVE_SAFE_RELEASE_RAMP_S if ramp_s is None else ramp_s
+        release_length_m = max(0.0, float(release_length_m))
+        max_speed_mps = max(1e-6, float(max_speed_mps))
+        ramp_s = max(0.0, float(ramp_s))
+        ramp_distance_m = 0.5 * max_speed_mps * ramp_s
+        if release_length_m <= 2.0 * ramp_distance_m and ramp_s > 0:
+            peak_speed_mps = math.sqrt(release_length_m * max_speed_mps / ramp_s)
+            return 2.0 * peak_speed_mps * ramp_s / max_speed_mps
+        cruise_distance_m = max(0.0, release_length_m - (2.0 * ramp_distance_m))
+        return (2.0 * ramp_s) + (cruise_distance_m / max_speed_mps)
+
+    def _passive_safety_release_speed_at(
+        self,
+        elapsed_s,
+        total_s,
+        max_speed_mps=None,
+        ramp_s=None,
+    ):
+        max_speed_mps = PASSIVE_SAFE_RELEASE_MAX_SPEED_MPS if max_speed_mps is None else max_speed_mps
+        ramp_s = PASSIVE_SAFE_RELEASE_RAMP_S if ramp_s is None else ramp_s
+        elapsed_s = max(0.0, float(elapsed_s))
+        total_s = max(0.0, float(total_s))
+        max_speed_mps = max(0.0, float(max_speed_mps))
+        ramp_s = max(0.0, min(float(ramp_s), total_s / 2.0 if total_s > 0 else 0.0))
+        if total_s <= 0.0 or max_speed_mps <= 0.0:
+            return 0.0
+        if ramp_s <= 0.0:
+            return max_speed_mps if elapsed_s < total_s else 0.0
+        if elapsed_s < ramp_s:
+            return max_speed_mps * (elapsed_s / ramp_s)
+        if elapsed_s > total_s - ramp_s:
+            return max_speed_mps * max(0.0, (total_s - elapsed_s) / ramp_s)
+        return max_speed_mps
+
+    async def _clear_passive_safety_motion(self):
+        if self.swing_cancellation_task is not None and not self.swing_cancellation_task.done():
+            self.swing_cancellation_task.cancel()
+        motion_task = getattr(self, 'motion_task', None)
+        if motion_task is not None and not motion_task.done():
+            self.motion_task = None
+            logger.info(f"Cancelling motion task for passive safety release: {motion_task.get_name()}")
+            motion_task.cancel()
+            try:
+                await motion_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception('Motion task failed while passive safety release was cancelling it')
+
+    async def _release_passive_safety_slack(self, ema, limit):
+        high_lines = [int(i) for i in np.where(np.asarray(ema) >= self._passive_safety_release_threshold())[0]]
+        await self._clear_passive_safety_motion()
+        for key in list(self.active_set):
+            self.input_velocities[key] = np.zeros(3)
+        self.active_set = set(['default'])
+        self.slow_stop_all_spools()
+        self._passive_safety_release_armed = False
+
+        message = (
+            f'Tension approached {limit:.1f} N on lines {high_lines}. '
+            'I stopped motion and am softly releasing 6 inches of slack on all four lines.'
+        )
+        logger.warning(message)
+        self.send_ui(pop_message=telemetry.Popup(message=message))
+
+        start_lengths = None
+        start_records = self._line_records_for_tension()
+        if start_records is not None:
+            start_lengths = start_records[:, 1].astype(float)
+
+        elapsed_s = 0.0
+        commanded_release_m = 0.0
+        total_s = self._passive_safety_release_profile_duration()
+        total_s = min(total_s, PASSIVE_SAFE_RELEASE_TIMEOUT_S)
+        try:
+            while elapsed_s < total_s and commanded_release_m < PASSIVE_SAFE_RELEASE_LENGTH_M:
+                current_tension = getattr(self.pe, 'tension', None)
+                if current_tension is not None:
+                    current_tension = np.asarray(current_tension, dtype=float)
+                    if np.any(current_tension > limit):
+                        OBS.record_safety_stop()
+                        logger.warning('Tension exceeded limit during soft slack release; switching to hard stop.')
+                        return await self._handle_passive_tension_limit(current_tension, limit)
+
+                if start_lengths is not None:
+                    records = self._line_records_for_tension()
+                    if records is not None:
+                        released_lengths = records[:, 1] - start_lengths
+                        if np.all(released_lengths >= PASSIVE_SAFE_RELEASE_LENGTH_M):
+                            break
+
+                next_elapsed_s = min(elapsed_s + PASSIVE_SAFE_RELEASE_POLL_S, total_s)
+                dt_s = max(0.0, next_elapsed_s - elapsed_s)
+                if dt_s <= 0.0:
+                    break
+                speed_mps = self._passive_safety_release_speed_at(
+                    elapsed_s + (dt_s / 2.0),
+                    total_s,
+                )
+                for line_no in range(N_LINES):
+                    await self.send_line_speed(line_no, speed_mps)
+                commanded_release_m += speed_mps * dt_s
+                await asyncio.sleep(dt_s)
+                elapsed_s = next_elapsed_s
+        finally:
+            for line_no in range(N_LINES):
+                await self.send_line_speed(line_no, 0)
+        return False
 
     async def _stop_for_passive_tension_limit(self):
         if self.swing_cancellation_task is not None and not self.swing_cancellation_task.done():
@@ -1475,48 +1628,34 @@ class AsyncObserver:
         self.send_ui(pop_message=telemetry.Popup(message=message))
 
     async def _handle_passive_tension_limit(self, ema, limit):
-        now = time.time()
         high_lines = [int(i) for i in np.where(np.asarray(ema) > limit)[0]]
-        retry_window_active = now < getattr(self, '_passive_safety_tension_limit_extra_until', 0.0)
-        retry_move = None if retry_window_active else self._get_passive_safety_retry_move(now)
+        calibration_active = bool(getattr(self, '_calibration_active', False))
+        if calibration_active:
+            self._record_calibration_hazard(
+                'tension_limit',
+                lines=high_lines,
+                message=f'tension exceeded {limit:.1f} N during calibration',
+                limit_n=float(limit),
+                tension=list(map(float, np.asarray(ema))),
+            )
 
         await self._stop_for_passive_tension_limit()
+        self._passive_safety_tension_limit_extra_until = 0.0
 
-        if retry_move is None:
-            self._passive_safety_tension_limit_extra_until = 0.0
-            if retry_window_active:
-                message = (
-                    f'Tension stayed above {limit:.1f} N during the retry on lines {high_lines}. '
-                    'I stopped and left the robot idle. Check for a caught line before moving again.'
-                )
-            else:
-                message = (
-                    f'Tension exceeded {limit:.1f} N on lines {high_lines}. '
-                    'I stopped and left the robot idle. Check the lines, then retry manually.'
-                )
-            logger.warning(message)
-            self._send_passive_safety_popup(message, now=now, throttle_s=5.0)
-            return False
-
-        retry_limit = PASSIVE_SAFE_TENSION_N + PASSIVE_SAFE_TENSION_RETRY_BUMP_N
-        self._passive_safety_retry_history[retry_move['signature']] = now
-        self._passive_safety_tension_limit_extra_until = now + PASSIVE_SAFE_RETRY_WINDOW_S
-        message = (
-            f'Tension exceeded {limit:.1f} N on lines {high_lines}. '
-            f'I backed off, temporarily raised the retry limit to {retry_limit:.1f} N, '
-            'and I am trying the last move once more.'
-        )
+        if calibration_active:
+            message = (
+                f'Calibration tension hazard on lines {high_lines}. '
+                'I stopped without retrying the same move. Check for caught lines or move hazards, '
+                'then rerun calibration from a safer zone.'
+            )
+        else:
+            message = (
+                f'Tension exceeded {limit:.1f} N on lines {high_lines}. '
+                'I stopped without retrying the same move. Check the lines before moving again.'
+            )
         logger.warning(message)
-        self._send_passive_safety_popup(message)
-        await self.move_direction_speed(
-            retry_move['velocity'],
-            speed=None,
-            starting_pos=self.pe.gant_pos,
-            downward_bias=0,
-            key=retry_move.get('key', 'default'),
-            record_retry=False,
-        )
-        return True
+        self._send_passive_safety_popup(message, now=time.time(), throttle_s=5.0)
+        return False
 
     async def passive_safety(self):
         """If any line becomes too tight, switch all motors to damped movement for one second."""
@@ -1525,10 +1664,17 @@ class AsyncObserver:
             ema = ema * 0.9 + self.pe.tension * 0.1
             max_safe_tension = self._passive_safety_tension_limit()
             OBS.record_tension(ema, max_safe_tension)
+            if np.all(ema < self._passive_safety_release_reset_threshold()):
+                self._passive_safety_release_armed = True
             if np.any(ema > max_safe_tension):
                 OBS.record_safety_stop()
                 logger.warning('Tension limit reached! backing off.')
                 await self._handle_passive_tension_limit(ema, max_safe_tension)
+            elif (
+                self._passive_safety_release_armed
+                and np.any(ema >= self._passive_safety_release_threshold())
+            ):
+                await self._release_passive_safety_slack(ema, max_safe_tension)
             await asyncio.sleep(0.2)
 
     async def update_observability_runtime(self):
@@ -1598,18 +1744,351 @@ class AsyncObserver:
         self.motion_task = asyncio.create_task(coro)
         self.motion_task.set_name(coro.__name__)
 
-    async def tension_lines(self):
+    def _tension_threshold(self, target_tension_n=None):
+        threshold = 0.5
+        if self.config.anchor_type == common.AnchorType.ARPEGGIO:
+            threshold = TENSION_THRESH
+        if target_tension_n is not None:
+            threshold = float(np.clip(float(target_tension_n), threshold, CAL_TENSION_TARGET_MAX_N))
+        return threshold
+
+    def _lines_below_tension_target(self, target_tension_n=None):
+        records = self._line_records_for_tension()
+        if records is None:
+            return list(range(N_LINES))
+        threshold = self._tension_threshold(target_tension_n)
+        tensions = records[:, 3]
+        return [
+            int(line_no)
+            for line_no, tension in enumerate(tensions)
+            if tension < threshold
+        ]
+
+    def _profiles_by_line(self, profiles):
+        return {
+            int(profile['line']): profile
+            for profile in (profiles or [])
+            if isinstance(profile, dict) and 'line' in profile
+        }
+
+    def _line_snapshot_by_line(self, snapshot):
+        return {
+            int(line['line']): line
+            for line in (snapshot or {}).get('lines', [])
+            if isinstance(line, dict) and 'line' in line
+        }
+
+    def _profile_accepted_statuses(self):
+        return {
+            'healthy',
+            'high_friction_healthy',
+            'low_tension_but_responsive',
+        }
+
+    def _line_tension_target_window(self, line_no, profile=None):
+        safe_tension = self._passive_safety_tension_limit()
+        status = profile.get('status') if isinstance(profile, dict) else None
+        baseline = None
+        if isinstance(profile, dict):
+            try:
+                baseline = float(profile.get('baseline_tension_n'))
+            except (TypeError, ValueError):
+                baseline = None
+
+        target_min = TENSION_THRESH if self.config.anchor_type == common.AnchorType.ARPEGGIO else 0.5
+        if status == 'low_tension_but_responsive' and baseline is not None and np.isfinite(baseline):
+            target_min = max(0.0, baseline - CAL_TENSION_PROFILE_LOW_MARGIN_N)
+        return float(target_min), float(safe_tension)
+
+    def _line_tension_inside_profile_window(self, line_no, profile, snapshot):
+        if not isinstance(profile, dict):
+            return False
+        if profile.get('status') not in self._profile_accepted_statuses():
+            return False
+        if not isinstance(snapshot, dict) or not snapshot.get('valid', False):
+            return False
+        try:
+            line_no = int(line_no)
+        except (TypeError, ValueError):
+            return False
+        if line_no in set(snapshot.get('high_tension_lines') or []):
+            return False
+        line = self._line_snapshot_by_line(snapshot).get(line_no)
+        if not isinstance(line, dict):
+            return False
+        try:
+            tension = float(line.get('tension_n'))
+        except (TypeError, ValueError):
+            return False
+        if not np.isfinite(tension):
+            return False
+        target_min, target_max = self._line_tension_target_window(line_no, profile)
+        return target_min <= tension <= target_max
+
+    def _profile_for_line_from_snapshot(self, line_no, snapshot, status=None, reason=None, diagnostics=None):
+        lines = self._line_snapshot_by_line(snapshot)
+        line = lines.get(int(line_no), {})
+        tension = line.get('tension_n')
+        length = line.get('length_m')
+        speed = line.get('speed_mps')
+        safe_tension = self._passive_safety_tension_limit()
+        try:
+            tension_value = float(tension)
+        except (TypeError, ValueError):
+            tension_value = np.nan
+
+        if status is None:
+            if not np.isfinite(tension_value):
+                status = 'nonresponsive'
+                reason = reason or 'invalid_tension'
+            elif tension_value > safe_tension:
+                status = 'unsafe_high_tension'
+                reason = reason or 'above_safe_tension'
+            elif tension_value >= CAL_TENSION_HIGH_FRICTION_N:
+                status = 'high_friction_healthy'
+                reason = reason or 'stable_high_friction_tension'
+            elif tension_value >= TENSION_THRESH:
+                status = 'healthy'
+                reason = reason or 'stable_tension'
+            else:
+                status = 'pending_probe'
+                reason = reason or 'below_default_threshold'
+
+        profile = {
+            'line': int(line_no),
+            'baseline_tension_n': None if not np.isfinite(tension_value) else tension_value,
+            'baseline_length_m': length,
+            'baseline_speed_mps': speed,
+            'observed_friction_n': max(0.0, tension_value - TENSION_THRESH) if np.isfinite(tension_value) else None,
+            'response_length_delta_m': None,
+            'response_tension_delta_n': None,
+            'status': status,
+            'reason': reason,
+            'line_action_state': line.get('line_action_state'),
+        }
+        target_min, target_max = self._line_tension_target_window(line_no, profile)
+        profile['target_min_n'] = target_min
+        profile['target_max_n'] = target_max
+        if diagnostics:
+            profile['response_diagnostic'] = diagnostics
+            profile['response_length_delta_m'] = diagnostics.get('length_delta_m')
+            profile['response_tension_delta_n'] = diagnostics.get('tension_delta_n')
+            profile['responsive'] = diagnostics.get('responsive')
+        return profile
+
+    def _classify_line_tension_response(self, line_no, before_snapshot, after_snapshot):
+        diagnostics = self._line_tension_response_diagnostics(before_snapshot, after_snapshot, [line_no])
+        diagnostic = diagnostics[0] if diagnostics else None
+        after_lines = self._line_snapshot_by_line(after_snapshot)
+        after = after_lines.get(int(line_no), {})
+        action_state = after.get('line_action_state') or {}
+        action_reason = action_state.get('reason')
+        action_status = action_state.get('status')
+        try:
+            tension = float(after.get('tension_n'))
+        except (TypeError, ValueError):
+            tension = np.nan
+
+        if np.isfinite(tension) and tension > self._passive_safety_tension_limit():
+            return 'unsafe_high_tension', 'above_safe_tension', diagnostic
+        if np.isfinite(tension) and tension >= CAL_TENSION_HIGH_FRICTION_N:
+            return 'high_friction_healthy', 'stable_high_friction_tension', diagnostic
+        if np.isfinite(tension) and tension >= TENSION_THRESH:
+            return 'healthy', 'stable_tension', diagnostic
+        if action_status == 'failed' and action_reason == 'line_state_stale':
+            return 'nonresponsive', 'line_state_stale', diagnostic
+        if diagnostic and diagnostic.get('responsive'):
+            return 'low_tension_but_responsive', diagnostic.get('reason'), diagnostic
+        if diagnostic:
+            return 'nonresponsive', diagnostic.get('reason'), diagnostic
+        return 'nonresponsive', 'below_threshold_without_response', diagnostic
+
+    def _lines_below_profile_targets(self, profiles):
+        records = self._line_records_for_tension()
+        if records is None:
+            return list(range(N_LINES))
+        by_line = self._profiles_by_line(profiles)
+        lines = []
+        for line_no, record in enumerate(records):
+            profile = by_line.get(int(line_no), {})
+            if profile.get('status') not in self._profile_accepted_statuses():
+                lines.append(int(line_no))
+                continue
+            target_min, _ = self._line_tension_target_window(line_no, profile)
+            if float(record[3]) < target_min:
+                lines.append(int(line_no))
+        return lines
+
+    async def tension_lines(self, target_tension_n=None, line_numbers=None):
         """Request all anchors to reel in all lines until tight.
         This is a fire and forget function"""
+        if line_numbers is None:
+            line_numbers = self._lines_below_tension_target(target_tension_n)
+        line_numbers = sorted({int(line_no) for line_no in line_numbers})
+        if not line_numbers:
+            logger.info('No lines below tension target; skipping tighten command')
+            return
+
         for client in self.anchors.values():
             if isinstance(client, RaspiAnchorClient):
-                asyncio.create_task(client.send_commands({'tighten': None}))
+                if client.anchor_num in line_numbers:
+                    asyncio.create_task(client.send_commands({'tighten': None}))
             elif isinstance(client, ArpeggioAnchorClient):
-                asyncio.create_task(client.send_commands({'tighten': 0}))
-                asyncio.create_task(client.send_commands({'tighten': 1}))
+                for spool_no in (0, 1):
+                    line_no = (int(client.anchor_num) * 2) + spool_no
+                    if line_no not in line_numbers:
+                        continue
+                    if target_tension_n is None:
+                        asyncio.create_task(client.send_commands({'tighten': spool_no}))
+                    else:
+                        asyncio.create_task(client.send_commands({
+                            'tighten': {
+                                'spool': spool_no,
+                                'target_tension_n': float(target_tension_n),
+                            }
+                        }))
         # This function does not  wait for confirmation from every anchor, as it would just hold up the processing of the ob_q
         # this is similar to sending a manual move command. it can be overridden by any subsequent command.
         # thus, it should be done while paused.
+
+    async def _calibration_tension_balance_move(
+        self,
+        snapshot,
+        target_tension_n=None,
+        calibration_artifact=None,
+        phase=None,
+        attempt=None,
+    ):
+        """Make a tiny in-envelope move that reduces tension imbalance before retensioning."""
+        if self.config.anchor_type != common.AnchorType.ARPEGGIO:
+            return False
+        if not isinstance(snapshot, dict) or snapshot.get('high_tension_lines'):
+            return False
+
+        try:
+            start_pos = np.asarray(self.pe.gant_pos, dtype=float).reshape(-1)[:3]
+            anchor_points = np.asarray(self.pe.anchor_points, dtype=float)
+        except (TypeError, ValueError, AttributeError):
+            logger.exception('Cannot compute calibration tension balance move from current geometry')
+            return False
+        if start_pos.size < 3 or anchor_points.ndim != 2 or anchor_points.shape[1] < 3:
+            return False
+        if not np.all(np.isfinite(start_pos)) or not np.all(np.isfinite(anchor_points[:, :3])):
+            return False
+
+        target_tension = self._tension_threshold(target_tension_n)
+        balance_vector = np.zeros(3, dtype=float)
+        balance_terms = []
+        for line in snapshot.get('lines') or []:
+            try:
+                line_no = int(line.get('line'))
+                tension = float(line.get('tension_n'))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if line_no < 0 or line_no >= min(N_LINES, len(anchor_points)) or not np.isfinite(tension):
+                continue
+            error = float(np.clip(
+                target_tension - tension,
+                -CAL_TENSION_BALANCE_ERROR_CLIP_N,
+                CAL_TENSION_BALANCE_ERROR_CLIP_N,
+            ))
+            if abs(error) < CAL_TENSION_BALANCE_ERROR_DEADBAND_N:
+                continue
+            line_vector = start_pos - anchor_points[line_no, :3]
+            norm = float(np.linalg.norm(line_vector))
+            if norm <= 1e-6 or not np.isfinite(norm):
+                continue
+            unit_away_from_endpoint = line_vector / norm
+            balance_vector += error * unit_away_from_endpoint
+            balance_terms.append({
+                'line': line_no,
+                'tension_n': tension,
+                'error_n': error,
+                'unit_away_from_endpoint': unit_away_from_endpoint.tolist(),
+            })
+
+        norm = float(np.linalg.norm(balance_vector))
+        if norm <= 1e-6 or not np.isfinite(norm):
+            return False
+
+        direction = balance_vector / norm
+        step_m = CAL_TENSION_BALANCE_STEP_M
+        target_pos = start_pos + (direction * step_m)
+        ok, reason = self._calibration_point_safe(target_pos, 'calibration_tension_balance')
+        if not ok and abs(direction[2]) > 1e-6:
+            horizontal = direction.copy()
+            horizontal[2] = 0.0
+            horizontal_norm = float(np.linalg.norm(horizontal))
+            if horizontal_norm > 1e-6 and np.isfinite(horizontal_norm):
+                horizontal /= horizontal_norm
+                horizontal_target = start_pos + (horizontal * step_m)
+                horizontal_ok, horizontal_reason = self._calibration_point_safe(
+                    horizontal_target,
+                    'calibration_tension_balance',
+                )
+                if horizontal_ok:
+                    direction = horizontal
+                    target_pos = horizontal_target
+                    ok = True
+                else:
+                    reason = horizontal_reason
+        if not ok:
+            logger.warning('Skipping calibration tension balance move: %s', reason)
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='calibration_tension_balance_move',
+                    phase=phase,
+                    attempt=attempt,
+                    skipped=True,
+                    reason=reason,
+                    start_pos=start_pos,
+                    target_pos=target_pos,
+                    target_tension_n=target_tension,
+                    terms=balance_terms,
+                )
+            return False
+
+        duration_s = step_m / max(CAL_TENSION_BALANCE_SPEED_MPS, 1e-6)
+        logger.info(
+            f'Calibration tension balance move attempt={attempt}: '
+            f'direction={direction} duration={duration_s:.2f}s target={target_pos}'
+        )
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='calibration_tension_balance_move',
+                phase=phase,
+                attempt=attempt,
+                skipped=False,
+                start_pos=start_pos,
+                target_pos=target_pos,
+                direction=direction,
+                step_m=step_m,
+                speed_mps=CAL_TENSION_BALANCE_SPEED_MPS,
+                duration_s=duration_s,
+                target_tension_n=target_tension,
+                terms=balance_terms,
+            )
+
+        await self.move_direction_speed(
+            direction,
+            speed=CAL_TENSION_BALANCE_SPEED_MPS,
+            starting_pos=start_pos,
+            downward_bias=0,
+            key='default',
+            record_retry=False,
+        )
+        await asyncio.sleep(duration_s)
+        self.input_velocities['default'] = np.zeros(3)
+        self.slow_stop_all_spools()
+        await asyncio.sleep(CAL_TENSION_BALANCE_SETTLE_S)
+        self._record_calibration_line_health(
+            calibration_artifact,
+            kind='after_tension_balance_move',
+            calibration_phase=phase,
+            attempt=attempt,
+            target_tension_n=target_tension,
+        )
+        return True
 
     async def stow_lines(self):
         """Request all anchors to reel in all lines until tight and then disable motors"""
@@ -1646,11 +2125,10 @@ class AsyncObserver:
         self,
         timeout_s=TENSION_WAIT_TIMEOUT_S,
         poll_interval_s=TENSION_POLL_INTERVAL_S,
+        target_tension_n=None,
     ):
         """Return True only after all lines are taut and settled; stop spools on failure."""
-        threshold = 0.5
-        if self.config.anchor_type == common.AnchorType.ARPEGGIO:
-            threshold = TENSION_THRESH
+        threshold = self._tension_threshold(target_tension_n)
 
         last_tension = np.full(N_LINES, np.nan)
         last_speed_norm = np.nan
@@ -1665,7 +2143,7 @@ class AsyncObserver:
             tension = records[:, 3]
             last_tension = tension
             last_speed_norm = float(np.linalg.norm(speeds))
-            if np.all(tension > threshold) and last_speed_norm < TENSION_SPEED_NORM_THRESHOLD:
+            if np.all(tension >= threshold) and last_speed_norm < TENSION_SPEED_NORM_THRESHOLD:
                 logger.debug(f'tension on lines = {tension}, speed_norm={last_speed_norm}')
                 return True
 
@@ -1676,14 +2154,613 @@ class AsyncObserver:
         self.slow_stop_all_spools()
         return False
 
-    async def tension_and_wait(self):
+    async def wait_for_profile_tension(
+        self,
+        profiles,
+        timeout_s=TENSION_WAIT_TIMEOUT_S,
+        poll_interval_s=TENSION_POLL_INTERVAL_S,
+    ):
+        profile_by_line = self._profiles_by_line(profiles)
+        if len(profile_by_line) != N_LINES:
+            logger.warning('Cannot wait for profile tension without profiles for every line')
+            self.slow_stop_all_spools()
+            return False
+
+        last_tension = np.full(N_LINES, np.nan)
+        last_speed_norm = np.nan
+        timeout = time.time() + timeout_s
+        while time.time() < timeout:
+            await asyncio.sleep(poll_interval_s)
+            records = self._line_records_for_tension()
+            if records is None:
+                continue
+
+            speeds = records[:, 2]
+            tensions = records[:, 3]
+            last_tension = tensions
+            last_speed_norm = float(np.linalg.norm(speeds))
+            if last_speed_norm >= TENSION_SPEED_NORM_THRESHOLD:
+                continue
+
+            ok = True
+            for line_no, tension in enumerate(tensions):
+                profile = profile_by_line.get(int(line_no), {})
+                if profile.get('status') not in self._profile_accepted_statuses():
+                    ok = False
+                    break
+                target_min, target_max = self._line_tension_target_window(line_no, profile)
+                if tension < target_min or tension > target_max:
+                    ok = False
+                    break
+            if ok:
+                logger.debug(f'profile tension accepted = {tensions}, speed_norm={last_speed_norm}')
+                return True
+
+        logger.warning(
+            f'Timed out waiting for profile line tension. tension={last_tension}, '
+            f'speed_norm={last_speed_norm}, profiles={profiles}'
+        )
+        self.slow_stop_all_spools()
+        return False
+
+    async def wait_for_fresh_line_records(
+        self,
+        timeout_s=CAL_REFERENCE_REACQUIRE_TIMEOUT_S,
+        poll_interval_s=TENSION_POLL_INTERVAL_S,
+    ):
+        timeout = time.time() + timeout_s
+        while time.time() < timeout:
+            if self._line_records_for_tension() is not None:
+                return True
+            await asyncio.sleep(poll_interval_s)
+        return False
+
+    async def _run_bounded_line_tension_probe(
+        self,
+        line_no,
+        target_min_n,
+        duration_s=CAL_TENSION_PROFILE_PROBE_WAIT_S,
+        speed_mps=CAL_TENSION_PROFILE_PROBE_SPEED_MPS,
+        poll_interval_s=CAL_TENSION_PROFILE_PROBE_POLL_S,
+    ):
+        line_no = int(line_no)
+        safe_tension = self._passive_safety_tension_limit()
+        target_min_n = float(target_min_n)
+        max_pull_m = abs(float(speed_mps)) * max(0.0, float(duration_s))
+        started = time.monotonic()
+        start_length = None
+        max_tension_n = None
+        max_tension_line = None
+        final_tension_n = None
+        final_length_delta_m = None
+        stopped_reason = 'duration_elapsed'
+
+        records = self._line_records_for_tension()
+        if records is not None:
+            try:
+                start_length = float(records[line_no, 1])
+            except (IndexError, TypeError, ValueError):
+                start_length = None
+
+        await self.send_line_speed(line_no, speed_mps)
+        try:
+            deadline = time.monotonic() + max(0.0, float(duration_s))
+            while time.monotonic() < deadline:
+                await asyncio.sleep(max(0.0, float(poll_interval_s)))
+                records = self._line_records_for_tension()
+                if records is None:
+                    continue
+
+                tensions = records[:, 3]
+                lengths = records[:, 1]
+                if not np.all(np.isfinite(tensions)):
+                    continue
+
+                sample_max_line = int(np.argmax(tensions))
+                sample_max_tension = float(tensions[sample_max_line])
+                if max_tension_n is None or sample_max_tension > max_tension_n:
+                    max_tension_n = sample_max_tension
+                    max_tension_line = sample_max_line
+
+                final_tension_n = float(tensions[line_no])
+                if start_length is not None and np.isfinite(lengths[line_no]):
+                    final_length_delta_m = float(lengths[line_no] - start_length)
+
+                if sample_max_tension >= safe_tension - CAL_TENSION_PROFILE_SAFE_MARGIN_N:
+                    stopped_reason = 'near_safe_tension'
+                    break
+                if final_tension_n >= target_min_n:
+                    stopped_reason = 'target_tension_reached'
+                    break
+                if (
+                    final_length_delta_m is not None
+                    and speed_mps < 0
+                    and final_length_delta_m <= -max_pull_m
+                ):
+                    stopped_reason = 'max_probe_pull_reached'
+                    break
+        finally:
+            await self.send_line_speed(line_no, 0)
+            self.slow_stop_all_spools()
+
+        return {
+            'line': line_no,
+            'speed_mps': float(speed_mps),
+            'target_min_n': target_min_n,
+            'duration_limit_s': float(duration_s),
+            'elapsed_s': float(time.monotonic() - started),
+            'stopped_reason': stopped_reason,
+            'safe_tension_n': float(safe_tension),
+            'safe_margin_n': float(CAL_TENSION_PROFILE_SAFE_MARGIN_N),
+            'max_tension_n': max_tension_n,
+            'max_tension_line': max_tension_line,
+            'final_tension_n': final_tension_n,
+            'final_length_delta_m': final_length_delta_m,
+        }
+
+    async def diagnose_line_tension_profiles(self, calibration_artifact=None, phase='line_tension_profile_diagnostic'):
+        if self.config.anchor_type != common.AnchorType.ARPEGGIO:
+            snapshot = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='line_tension_profile_diagnostic_skipped',
+                calibration_phase=phase,
+            )
+            return []
+
+        await self.wait_for_fresh_line_records()
+        profiles = []
+        initial_snapshot = self._record_calibration_line_health(
+            calibration_artifact,
+            kind='before_line_tension_profile_diagnostic',
+            calibration_phase=phase,
+        )
+        if not isinstance(initial_snapshot, dict) or not initial_snapshot.get('valid', False):
+            return [
+                self._profile_for_line_from_snapshot(line_no, initial_snapshot, status='nonresponsive', reason='invalid_line_health')
+                for line_no in range(N_LINES)
+            ]
+        if initial_snapshot.get('high_tension_lines'):
+            return [
+                self._profile_for_line_from_snapshot(
+                    line_no,
+                    initial_snapshot,
+                    status='unsafe_high_tension' if line_no in initial_snapshot.get('high_tension_lines', []) else None,
+                    reason='above_safe_tension' if line_no in initial_snapshot.get('high_tension_lines', []) else None,
+                )
+                for line_no in range(N_LINES)
+            ]
+
+        initial_lines = self._line_snapshot_by_line(initial_snapshot)
+        for line_no in range(N_LINES):
+            line = initial_lines.get(line_no, {})
+            try:
+                tension = float(line.get('tension_n'))
+            except (TypeError, ValueError):
+                tension = np.nan
+            if np.isfinite(tension) and tension >= TENSION_THRESH:
+                profiles.append(self._profile_for_line_from_snapshot(line_no, initial_snapshot))
+                continue
+
+            before_snapshot = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='before_line_tension_profile_probe',
+                calibration_phase=phase,
+                probe_line=line_no,
+            )
+            target_min, _ = self._line_tension_target_window(line_no, None)
+            probe_result = await self._run_bounded_line_tension_probe(line_no, target_min)
+            await asyncio.sleep(CAL_TENSION_PROFILE_SETTLE_S)
+            after_snapshot = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='after_line_tension_profile_probe',
+                calibration_phase=phase,
+                probe_line=line_no,
+                requested_tension_lines=[line_no],
+                response_baseline_snapshot=before_snapshot,
+                profile_probe_speed_mps=CAL_TENSION_PROFILE_PROBE_SPEED_MPS,
+                profile_probe_result=probe_result,
+                target_tension_n=TENSION_THRESH,
+                threshold_n=TENSION_THRESH,
+            )
+            status, reason, diagnostic = self._classify_line_tension_response(
+                line_no,
+                before_snapshot,
+                after_snapshot,
+            )
+            if probe_result.get('stopped_reason') == 'near_safe_tension':
+                status = 'unsafe_high_tension'
+                reason = 'near_safe_tension'
+            profiles.append(self._profile_for_line_from_snapshot(
+                line_no,
+                after_snapshot,
+                status=status,
+                reason=reason,
+                diagnostics=diagnostic,
+            ))
+            if status == 'unsafe_high_tension':
+                break
+
+        seen = {profile['line'] for profile in profiles}
+        final_snapshot = self._snapshot_line_health(kind='line_tension_profile_fill')
+        for line_no in range(N_LINES):
+            if line_no not in seen:
+                profiles.append(self._profile_for_line_from_snapshot(line_no, final_snapshot))
+        profiles = sorted(profiles, key=lambda profile: int(profile['line']))
+        self._record_calibration_line_health(
+            calibration_artifact,
+            kind='line_tension_profile_diagnostic',
+            calibration_phase=phase,
+            line_tension_profiles=profiles,
+        )
+        return profiles
+
+    def _merge_line_tension_profile(self, profiles, profile):
+        by_line = self._profiles_by_line(profiles)
+        if isinstance(profile, dict) and 'line' in profile:
+            by_line[int(profile['line'])] = profile
+        return [
+            by_line[line_no]
+            for line_no in sorted(by_line)
+        ]
+
+    async def recover_profile_tension_lines(
+        self,
+        profiles,
+        line_numbers,
+        calibration_artifact=None,
+        phase=None,
+        attempt=None,
+        target_tension_n=None,
+    ):
+        """Recover only the profiled lines that are currently below their own window."""
+        profiles = list(profiles or [])
+        line_numbers = sorted({int(line_no) for line_no in (line_numbers or [])})
+        if not line_numbers:
+            return profiles
+
+        for line_no in line_numbers:
+            before_snapshot = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='before_line_tension_profile_recovery',
+                calibration_phase=phase,
+                attempt=attempt,
+                recovery_line=line_no,
+                requested_tension_lines=[line_no],
+                target_tension_n=target_tension_n,
+                threshold_n=target_tension_n,
+                line_tension_profiles=profiles,
+            )
+            if isinstance(before_snapshot, dict) and before_snapshot.get('high_tension_lines'):
+                profiles = self._merge_line_tension_profile(
+                    profiles,
+                    self._profile_for_line_from_snapshot(
+                        line_no,
+                        before_snapshot,
+                        status='unsafe_high_tension',
+                        reason='above_safe_tension',
+                    ),
+                )
+                break
+
+            profile = self._profiles_by_line(profiles).get(line_no)
+            if self._line_tension_inside_profile_window(line_no, profile, before_snapshot):
+                profiles = self._merge_line_tension_profile(
+                    profiles,
+                    self._profile_for_line_from_snapshot(
+                        line_no,
+                        before_snapshot,
+                        status=profile.get('status'),
+                        reason='within_accepted_profile_window_before_recovery',
+                    ),
+                )
+                self._record_calibration_line_health(
+                    calibration_artifact,
+                    kind='line_tension_profile_recovery_skipped',
+                    calibration_phase=phase,
+                    attempt=attempt,
+                    recovery_line=line_no,
+                    requested_tension_lines=[line_no],
+                    target_tension_n=target_tension_n,
+                    threshold_n=target_tension_n,
+                    line_tension_profiles=profiles,
+                    recovery_skip_reason='within_accepted_profile_window',
+                )
+                continue
+
+            target_min, _ = self._line_tension_target_window(line_no, profile)
+            probe_result = await self._run_bounded_line_tension_probe(line_no, target_min)
+            await asyncio.sleep(CAL_TENSION_PROFILE_SETTLE_S)
+
+            after_snapshot = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='after_line_tension_profile_recovery',
+                calibration_phase=phase,
+                attempt=attempt,
+                recovery_line=line_no,
+                requested_tension_lines=[line_no],
+                response_baseline_snapshot=before_snapshot,
+                profile_probe_speed_mps=CAL_TENSION_PROFILE_PROBE_SPEED_MPS,
+                profile_probe_result=probe_result,
+                target_tension_n=target_tension_n,
+                threshold_n=target_tension_n,
+                line_tension_profiles=profiles,
+            )
+            status, reason, diagnostic = self._classify_line_tension_response(
+                line_no,
+                before_snapshot,
+                after_snapshot,
+            )
+            if probe_result.get('stopped_reason') == 'near_safe_tension':
+                status = 'unsafe_high_tension'
+                reason = 'near_safe_tension'
+            elif (
+                profile is not None
+                and profile.get('status') in self._profile_accepted_statuses()
+                and status not in self._profile_accepted_statuses()
+                and self._line_tension_inside_profile_window(line_no, profile, after_snapshot)
+            ):
+                status = profile.get('status')
+                reason = 'within_accepted_profile_window_after_recovery'
+                diagnostic = None
+            profiles = self._merge_line_tension_profile(
+                profiles,
+                self._profile_for_line_from_snapshot(
+                    line_no,
+                    after_snapshot,
+                    status=status,
+                    reason=reason,
+                    diagnostics=diagnostic,
+                ),
+            )
+            if status == 'unsafe_high_tension':
+                break
+
+        self._record_calibration_line_health(
+            calibration_artifact,
+            kind='line_tension_profile_recovery',
+            calibration_phase=phase,
+            attempt=attempt,
+            requested_tension_lines=line_numbers,
+            target_tension_n=target_tension_n,
+            threshold_n=target_tension_n,
+            line_tension_profiles=profiles,
+        )
+        return profiles
+
+    def _line_profiles_blocking_reasons(self, profiles):
+        reasons = []
+        for profile in profiles or []:
+            if profile.get('status') == 'unsafe_high_tension':
+                reasons.append(f'line {profile.get("line")} above safe tension')
+            elif profile.get('status') not in self._profile_accepted_statuses():
+                reasons.append(f'line {profile.get("line")} {profile.get("status")}: {profile.get("reason")}')
+        return reasons
+
+    async def run_line_tension_profile_diagnostic(self):
+        artifact = self._new_calibration_artifact('line_tension_profile_diagnostic')
+        artifact.set_phase('line_tension_profile_diagnostic')
+        try:
+            profiles = await self.diagnose_line_tension_profiles(
+                calibration_artifact=artifact,
+                phase='line_tension_profile_diagnostic',
+            )
+            reasons = self._line_profiles_blocking_reasons(profiles)
+            status = 'failed' if reasons else 'completed'
+            message = '; '.join(reasons) if reasons else 'line tension profiles accepted'
+            self._write_calibration_artifact(artifact, status=status, message=message)
+            logger.info('Line tension profile diagnostic %s: %s', status, message)
+            return not reasons
+        finally:
+            self.slow_stop_all_spools()
+
+    async def tension_and_wait(self, calibration_artifact=None, phase=None):
         """Send tightening command and wait until lines appear tight. This is not a motion task"""
         logger.info('Tightening all lines')
-        await self.tension_lines()
-        ok = await self.wait_for_tension()
-        if not ok:
-            logger.warning('Line tension failed; calibration/motion caller must abort before saving references')
-        return ok
+        self._last_tension_failure_message = None
+        before_snapshot = self._record_calibration_line_health(
+            calibration_artifact,
+            kind='before_tension',
+            calibration_phase=phase,
+        )
+        if calibration_artifact is not None and self.config.anchor_type == common.AnchorType.ARPEGGIO:
+            base_target = TENSION_THRESH
+            attempt_count = 1 + max(0, int(CAL_TENSION_RECOVERY_ATTEMPTS))
+            line_tension_profiles = getattr(self, '_calibration_line_tension_profiles', None)
+            if line_tension_profiles:
+                self._record_calibration_line_health(
+                    calibration_artifact,
+                    kind='line_tension_profile_reused',
+                    calibration_phase=phase,
+                    line_tension_profiles=line_tension_profiles,
+                )
+            else:
+                line_tension_profiles = await self.diagnose_line_tension_profiles(
+                    calibration_artifact=calibration_artifact,
+                    phase=phase,
+                )
+                self._calibration_line_tension_profiles = line_tension_profiles
+            profile_reasons = self._line_profiles_blocking_reasons(line_tension_profiles)
+            if profile_reasons:
+                snapshot = self._record_calibration_line_health(
+                    calibration_artifact,
+                    kind='line_tension_profile_rejected',
+                    calibration_phase=phase,
+                    line_tension_profiles=line_tension_profiles,
+                    line_tension_profile_reasons=profile_reasons,
+                )
+                self._last_tension_failure_message = self._line_tension_failure_message(snapshot)
+                logger.warning('Line tension profile rejected: %s', profile_reasons)
+                self.slow_stop_all_spools()
+                return False
+        else:
+            base_target = None
+            attempt_count = 1
+            line_tension_profiles = None
+        for attempt in range(1, attempt_count + 1):
+            if attempt > 1:
+                logger.info(f'Retrying line tension recovery attempt {attempt}/{attempt_count}')
+                await asyncio.sleep(CAL_TENSION_RECOVERY_PAUSE_S)
+                before_snapshot = self._record_calibration_line_health(
+                    calibration_artifact,
+                    kind='before_tension_retry',
+                    calibration_phase=phase,
+                    attempt=attempt,
+                    max_attempts=attempt_count,
+                )
+
+            target_tension_n = None
+            if base_target is not None:
+                target_tension_n = min(
+                    CAL_TENSION_TARGET_MAX_N,
+                    base_target + ((attempt - 1) * CAL_TENSION_TARGET_STEP_N),
+                )
+                logger.info(
+                    f'Calibration retension attempt {attempt}/{attempt_count}: '
+                    f'target_tension={target_tension_n:.2f} N'
+                )
+
+            line_numbers = None
+            if self.config.anchor_type == common.AnchorType.ARPEGGIO:
+                if line_tension_profiles:
+                    line_numbers = self._lines_below_profile_targets(line_tension_profiles)
+                else:
+                    line_numbers = self._lines_below_tension_target(target_tension_n)
+                logger.info(
+                    f'Calibration retension attempt {attempt}/{attempt_count}: '
+                    f'tightening lines {line_numbers}'
+                )
+
+            if line_tension_profiles:
+                line_tension_profiles = await self.recover_profile_tension_lines(
+                    line_tension_profiles,
+                    line_numbers,
+                    calibration_artifact=calibration_artifact,
+                    phase=phase,
+                    attempt=attempt,
+                    target_tension_n=target_tension_n,
+                )
+                self._calibration_line_tension_profiles = line_tension_profiles
+                profile_reasons = self._line_profiles_blocking_reasons(line_tension_profiles)
+                if profile_reasons:
+                    self._record_calibration_line_health(
+                        calibration_artifact,
+                        kind='line_tension_profile_recovery_rejected',
+                        calibration_phase=phase,
+                        attempt=attempt,
+                        requested_tension_lines=line_numbers,
+                        line_tension_profiles=line_tension_profiles,
+                        line_tension_profile_reasons=profile_reasons,
+                    )
+                    logger.warning('Line tension profile recovery rejected: %s', profile_reasons)
+                    self.slow_stop_all_spools()
+                    return False
+            else:
+                await self.tension_lines(target_tension_n=target_tension_n, line_numbers=line_numbers)
+            if line_tension_profiles:
+                ok = await self.wait_for_profile_tension(line_tension_profiles)
+            else:
+                ok = await self.wait_for_tension(target_tension_n=target_tension_n)
+            if self._fail_on_calibration_hazard(calibration_artifact, phase=phase):
+                self.slow_stop_all_spools()
+                return False
+            snapshot = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='after_tension' if attempt == 1 else 'after_tension_retry',
+                calibration_phase=phase,
+                settled=bool(ok),
+                attempt=attempt,
+                max_attempts=attempt_count,
+                requested_tension_lines=line_numbers,
+                response_baseline_snapshot=before_snapshot,
+                line_tension_profiles=line_tension_profiles,
+                target_tension_n=target_tension_n,
+                threshold_n=target_tension_n if target_tension_n is not None else None,
+            )
+            if ok:
+                return True
+
+            message = self._line_tension_failure_message(snapshot)
+            self._last_tension_failure_message = message
+            logger.warning(f'Line tension attempt {attempt}/{attempt_count} failed; {message}')
+            if isinstance(snapshot, dict) and snapshot.get('high_tension_lines'):
+                break
+            if (
+                attempt < attempt_count
+                and calibration_artifact is not None
+                and self.config.anchor_type == common.AnchorType.ARPEGGIO
+            ):
+                await self._calibration_tension_balance_move(
+                    snapshot,
+                    target_tension_n=target_tension_n,
+                    calibration_artifact=calibration_artifact,
+                    phase=phase,
+                    attempt=attempt,
+                )
+            before_snapshot = snapshot
+
+        logger.warning('Line tension failed; calibration/motion caller must abort before saving references')
+        return False
+
+    def _gantry_reference_observation_summary(self, max_age_s=REFERENCE_VISUAL_MAX_AGE_S):
+        try:
+            data = np.array(self.datastore.gantry_pos.deepCopy(), dtype=float)
+        except Exception as exc:
+            logger.exception('Failed to summarize gantry visual data before reference length reset')
+            return {
+                'valid': False,
+                'error': repr(exc),
+            }
+
+        if data.ndim != 2 or data.shape[1] < 5:
+            return {
+                'valid': False,
+                'error': f'invalid_shape_{data.shape}',
+            }
+
+        now = time.time()
+        expected_anchors = sorted(int(anchor_num) for anchor_num in getattr(self, 'anchors', {}).keys())
+        timestamps = data[:, 0]
+        anchor_nums = data[:, 1]
+        positions = data[:, 2:5]
+        finite_rows = (
+            (timestamps > 0)
+            & np.isfinite(anchor_nums)
+            & np.all(np.isfinite(positions), axis=1)
+        )
+        finite = data[finite_rows]
+        fresh = finite[(now - finite[:, 0]) <= max_age_s] if len(finite) else finite
+
+        per_anchor = []
+        for anchor_num in expected_anchors:
+            anchor_rows = finite[finite[:, 1].astype(int) == anchor_num] if len(finite) else finite
+            if len(anchor_rows):
+                latest_ts = float(np.max(anchor_rows[:, 0]))
+                latest_age_s = float(now - latest_ts)
+                fresh_count = int(np.sum((now - anchor_rows[:, 0]) <= max_age_s))
+            else:
+                latest_age_s = None
+                fresh_count = 0
+            per_anchor.append({
+                'anchor_num': anchor_num,
+                'observation_count': int(len(anchor_rows)),
+                'fresh_count': fresh_count,
+                'latest_age_s': latest_age_s,
+                'fresh': bool(fresh_count > 0),
+            })
+
+        return {
+            'valid': True,
+            'max_age_s': max_age_s,
+            'expected_anchors': expected_anchors,
+            'fresh_anchor_count': int(len(np.unique(fresh[:, 1].astype(int)))) if len(fresh) else 0,
+            'fresh_anchors': sorted([int(anchor_num) for anchor_num in np.unique(fresh[:, 1].astype(int))]) if len(fresh) else [],
+            'stale_or_missing_anchors': [
+                item['anchor_num']
+                for item in per_anchor
+                if not item['fresh']
+            ],
+            'per_anchor': per_anchor,
+        }
 
     def _fresh_gantry_reference_position(
         self,
@@ -1731,6 +2808,43 @@ class AsyncObserver:
             return None
         return position
 
+    async def _wait_for_fresh_gantry_reference_position(
+        self,
+        timeout_s=CAL_REFERENCE_REACQUIRE_TIMEOUT_S,
+        poll_interval_s=CAL_REFERENCE_REACQUIRE_POLL_S,
+        min_unique_anchors=None,
+    ):
+        deadline = time.time() + timeout_s
+        while time.time() <= deadline:
+            position = self._fresh_gantry_reference_position(min_unique_anchors=min_unique_anchors)
+            if position is not None:
+                return position
+            await asyncio.sleep(poll_interval_s)
+        return None
+
+    def _allow_degraded_reference_reset(self):
+        safety_config = self._calibration_safety_config()
+        mode = self._calibration_mode(safety_config)
+        return mode in ('constrained', 'manual_assisted') or bool(
+            safety_config.get('allowDegradedReference')
+            or safety_config.get('allow_degraded_reference')
+        )
+
+    def _allow_degraded_reference_config(self, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        return bool(
+            safety_config.get('allowDegradedReference')
+            or safety_config.get('allow_degraded_reference')
+        )
+
+    def _manual_assist_reference_timeout(self):
+        safety_config = self._calibration_safety_config()
+        return self._safety_number(
+            safety_config,
+            ('manualAssistTimeoutS', 'manual_assist_timeout_s'),
+            20.0,
+        )
+
     async def sendReferenceLengths(self, lengths):
         lengths = np.asarray(lengths, dtype=float)
         if lengths.ndim != 1 or lengths.shape[0] != N_LINES:
@@ -1740,7 +2854,42 @@ class AsyncObserver:
             logger.warning(f'Cannot send invalid reference lengths to anchors: {lengths}')
             return False
 
-        position = self._fresh_gantry_reference_position()
+        expected_anchors = len(getattr(self, 'anchors', {}))
+        min_unique_anchors = min(2, max(1, expected_anchors))
+        self._last_reference_reset_degraded = False
+        position = await self._wait_for_fresh_gantry_reference_position(
+            min_unique_anchors=min_unique_anchors,
+        )
+        mode = self._calibration_mode()
+        if position is None and mode == 'manual_assisted':
+            timeout_s = self._manual_assist_reference_timeout()
+            message = (
+                'Calibration needs fresh gantry visuals. Move the gantry/target into the configured safe zone '
+                f'with both anchor cameras visible; waiting up to {timeout_s:.0f}s.'
+            )
+            logger.warning(message)
+            self.send_ui(operation_progress=telemetry.OperationProgress(
+                percent_complete=100.0,
+                name="Calibration",
+                current_action=message,
+            ))
+            self.send_ui(pop_message=telemetry.Popup(message=message))
+            position = await self._wait_for_fresh_gantry_reference_position(
+                timeout_s=timeout_s,
+                min_unique_anchors=min_unique_anchors,
+            )
+        if position is None and min_unique_anchors > 1 and self._allow_degraded_reference_reset():
+            logger.warning(
+                'Falling back to degraded reference-length reset with one visual anchor; '
+                'calibration must pass health validation before it is trusted'
+            )
+            position = await self._wait_for_fresh_gantry_reference_position(
+                timeout_s=CAL_REFERENCE_REACQUIRE_TIMEOUT_S,
+                min_unique_anchors=1,
+            )
+            if position is not None:
+                self._last_reference_reset_degraded = True
+                self._calibration_degraded_reference_count += 1
         if position is None:
             logger.warning('Cannot send reference lengths without fresh visual gantry data')
             return False
@@ -1867,13 +3016,711 @@ class AsyncObserver:
                 # print(f'anchor {client.anchor_num} has {len(raw_obs[marker][client.anchor_num])} observations of {marker}')
         return dict(raw_obs)
 
-    def save_poses_arp(self, anchor_poses, eyelet_positions):
+    def _room_points_from_marker_observations(self, raw_obs, anchor_poses, marker_name, cam_tilts):
+        if not raw_obs or marker_name not in raw_obs:
+            return []
+        tilt_nodes = []
+        for i in range(2):
+            extratilt = 22 - cam_tilts[i]
+            tilt_nodes.append((np.array([extratilt / 180.0 * np.pi, 0, 0], dtype=float), np.zeros(3, dtype=float)))
+
+        points = []
+        for anchor_idx, marker_pose_cams in enumerate(raw_obs.get(marker_name, [])):
+            if anchor_idx >= len(anchor_poses):
+                continue
+            for marker_pose_cam in marker_pose_cams:
+                if marker_pose_cam is None:
+                    continue
+                pose_list = [
+                    anchor_poses[anchor_idx],
+                    model_constants.arp_anchor_camera,
+                    tilt_nodes[anchor_idx],
+                    marker_pose_cam,
+                ]
+                if marker_name == 'gantry':
+                    pose_list.append(gantry_april_inv)
+                try:
+                    points.append(np.asarray(compose_poses(pose_list)[1], dtype=float))
+                except Exception:
+                    logger.exception('Failed to project %s marker observation into room frame', marker_name)
+        return points
+
+    def _locate_gripper_markers(self):
+        gripper_client = getattr(self, 'gripper_client', None)
+        frame = getattr(gripper_client, 'last_frame_resized', None)
+        if frame is None:
+            return []
+        try:
+            pool = getattr(self, 'pool', None)
+            if pool is not None:
+                async_result = pool.apply_async(
+                    locate_markers_gripper,
+                    (frame, self.config.camera_cal_wide),
+                )
+                return list(async_result.get(timeout=5) or [])
+            return list(locate_markers_gripper(frame, self.config.camera_cal_wide) or [])
+        except Exception:
+            logger.exception('Failed to locate markers in gripper camera frame')
+            raise
+
+    async def _wait_for_gripper_marker(self, marker_name='origin', timeout_s=1.0, poll_s=0.1):
+        deadline = time.time() + max(0.0, float(timeout_s))
+        while True:
+            for detection in self._locate_gripper_markers():
+                if detection.get('n') == marker_name:
+                    return detection
+            if time.time() >= deadline:
+                return None
+            await asyncio.sleep(poll_s)
+
+    def _origin_card_partial_hint(self, frame=None):
+        """Detect a clipped origin card/tag in the gripper frame when AprilTag cannot."""
+        if frame is None:
+            frame = getattr(getattr(self, 'gripper_client', None), 'last_frame_resized', None)
+        if frame is None:
+            return None
+        try:
+            image = np.asarray(frame)
+        except (TypeError, ValueError):
+            return None
+        if image.ndim != 3 or image.shape[0] < 40 or image.shape[1] < 40:
+            return None
+
+        height, width = image.shape[:2]
+        frame_area = float(height * width)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        white_mask = cv2.inRange(gray, 145, 255)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+        white_count, _labels, white_stats, _white_centroids = cv2.connectedComponentsWithStats(white_mask)
+        card_index = None
+        card_area = 0
+        for index in range(1, white_count):
+            area = int(white_stats[index, cv2.CC_STAT_AREA])
+            if area > card_area:
+                card_area = area
+                card_index = index
+        if card_index is None or card_area < frame_area * 0.04:
+            return None
+
+        near_card = cv2.dilate(white_mask, np.ones((21, 21), np.uint8))
+        dark_mask = cv2.inRange(gray, 0, 80)
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(dark_mask)
+
+        best = None
+        for index in range(1, count):
+            x = int(stats[index, cv2.CC_STAT_LEFT])
+            y = int(stats[index, cv2.CC_STAT_TOP])
+            w = int(stats[index, cv2.CC_STAT_WIDTH])
+            h = int(stats[index, cv2.CC_STAT_HEIGHT])
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if area < frame_area * 0.006:
+                continue
+            touches = {
+                'left': x <= 2,
+                'top': y <= 2,
+                'right': x + w >= width - 2,
+                'bottom': y + h >= height - 2,
+            }
+            # Reject dark floor/background bands; a clipped tag usually touches one edge,
+            # not a full-height or full-width strip.
+            if sum(1 for value in touches.values() if value) >= 2 and (h > height * 0.75 or w > width * 0.75):
+                continue
+            component = labels == index
+            overlap = float(np.count_nonzero(component & (near_card > 0))) / max(1.0, float(area))
+            if overlap < 0.12:
+                continue
+            score = area * overlap
+            if best is None or score > best['score']:
+                center = np.asarray(centroids[index], dtype=float)
+                best = {
+                    'score': float(score),
+                    'bbox_px': [x, y, w, h],
+                    'center_px': [float(center[0]), float(center[1])],
+                    'center_error_norm': [
+                        float((center[0] - (width / 2.0)) / (width / 2.0)),
+                        float((center[1] - (height / 2.0)) / (height / 2.0)),
+                    ],
+                    'area_fraction': float(area / frame_area),
+                    'overlap_fraction': overlap,
+                    'touches_frame_edge': touches,
+                    'card_area_fraction': float(card_area / frame_area),
+                }
+        return best
+
+    def _spin_partial_card_direction(self, hint, step_idx):
+        if not hint:
+            return None, None
+        x, y, width, height = hint.get('bbox_px', [0, 0, 0, 0])
+        touches = hint.get('touches_frame_edge') or {}
+        clipped = any(touches.values())
+        large = max(float(width), float(height)) >= 0.55 * 384.0 or hint.get('area_fraction', 0.0) >= 0.12
+        if clipped or large or step_idx < 2:
+            return 'z_up_for_partial_origin_card', np.array([0.0, 0.0, 1.0])
+
+        err = np.asarray(hint.get('center_error_norm') or [0.0, 0.0], dtype=float)
+        if err.shape != (2,) or not np.all(np.isfinite(err)) or np.linalg.norm(err) < 0.15:
+            return 'z_up_for_partial_origin_card', np.array([0.0, 0.0, 1.0])
+
+        move_xy = np.array([err[1], err[0], 0.0], dtype=float)
+        norm = float(np.linalg.norm(move_xy))
+        if norm < 1e-6:
+            return 'z_up_for_partial_origin_card', np.array([0.0, 0.0, 1.0])
+        return 'xy_center_partial_origin_card', move_xy / norm
+
+    def _marker_bearing_samples(self, marker_pose_cams):
+        samples = []
+        for marker_pose_cam in marker_pose_cams or []:
+            if marker_pose_cam is None:
+                continue
+            try:
+                tvec = np.asarray(marker_pose_cam[1], dtype=float).reshape(-1)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if tvec.size < 3 or not np.all(np.isfinite(tvec[:3])) or abs(float(tvec[2])) < 1e-6:
+                continue
+            samples.append(tvec[:2] / float(tvec[2]))
+        return samples
+
+    def _spin_origin_anchor_alignment_snapshot(self, raw_obs=None):
+        raw_obs = self.snapshot_tag_observations() if raw_obs is None else raw_obs
+        origin_by_anchor = raw_obs.get('origin') or []
+        gantry_by_anchor = raw_obs.get('gantry') or []
+        anchor_count = max(len(origin_by_anchor), len(gantry_by_anchor))
+        anchors = []
+
+        for anchor_idx in range(anchor_count):
+            origin_samples = self._marker_bearing_samples(
+                origin_by_anchor[anchor_idx] if anchor_idx < len(origin_by_anchor) else []
+            )
+            gantry_samples = self._marker_bearing_samples(
+                gantry_by_anchor[anchor_idx] if anchor_idx < len(gantry_by_anchor) else []
+            )
+            if not origin_samples or not gantry_samples:
+                continue
+            origin_bearing = np.mean(np.asarray(origin_samples, dtype=float), axis=0)
+            gantry_bearing = np.mean(np.asarray(gantry_samples, dtype=float), axis=0)
+            error = gantry_bearing - origin_bearing
+            anchors.append({
+                'anchor': int(anchor_idx),
+                'origin_count': int(len(origin_samples)),
+                'gantry_count': int(len(gantry_samples)),
+                'origin_bearing': list(map(float, origin_bearing)),
+                'gantry_bearing': list(map(float, gantry_bearing)),
+                'error_bearing': list(map(float, error)),
+                'distance_bearing': float(np.linalg.norm(error)),
+            })
+
+        if not anchors:
+            return None
+
+        return {
+            'score': float(np.mean([entry['distance_bearing'] for entry in anchors])),
+            'anchors': anchors,
+            'origin_counts': [len(obs) for obs in origin_by_anchor],
+            'gantry_counts': [len(obs) for obs in gantry_by_anchor],
+        }
+
+    def _spin_staging_line_health_ok(self, calibration_artifact, label):
+        health = self._record_calibration_line_health(
+            calibration_artifact,
+            kind=label,
+        ) if calibration_artifact is not None else self._snapshot_line_health(kind=label)
+        high_lines = health.get('high_tension_lines') or []
+        if health.get('valid', False) and not high_lines:
+            return True
+
+        message = 'spin origin staging has unsafe line health'
+        if not health.get('valid', False):
+            message = f'{message}: {health.get("error", "invalid_line_health")}'
+        elif high_lines:
+            message = f'{message}: high tension lines {high_lines}'
+        hazard = self._record_calibration_hazard(
+            'spin_origin_staging',
+            lines=high_lines,
+            message=message,
+            fatal=True,
+        )
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='calibration_hazard',
+                hazard=hazard,
+                line_health=health,
+            )
+        return False
+
+    async def _run_spin_staging_pulse(
+        self,
+        direction,
+        speed_mps,
+        pulse_s,
+        safety_config,
+        zone_tolerance_m,
+        label,
+        calibration_artifact=None,
+        step=None,
+        hint=None,
+    ):
+        start_pos = getattr(getattr(self, 'pe', None), 'gant_pos', None)
+        try:
+            start_pos = np.asarray(start_pos, dtype=float).reshape(-1)[:3]
+        except (TypeError, ValueError):
+            start_pos = None
+        if start_pos is None or start_pos.size < 3 or not np.all(np.isfinite(start_pos)):
+            reason = 'no finite gantry position'
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='spin_origin_staging_candidate',
+                    step=step,
+                    label=label,
+                    accepted=False,
+                    reason=reason,
+                    partial_card_hint=hint,
+                )
+            return False, reason
+
+        direction = np.asarray(direction, dtype=float)
+        travel_m = float(speed_mps) * float(pulse_s)
+        target_pos = start_pos + direction * travel_m
+        ok, reason = self._calibration_point_safe(
+            target_pos,
+            label,
+            safety_config,
+            zone_margin_m=zone_tolerance_m,
+        )
+        if not ok:
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='spin_origin_staging_candidate',
+                    step=step,
+                    label=label,
+                    accepted=False,
+                    reason=reason,
+                    start_pos=start_pos,
+                    target_pos=target_pos,
+                    partial_card_hint=hint,
+                )
+            return False, reason
+
+        if not self._spin_staging_line_health_ok(
+            calibration_artifact,
+            f'before_{label}',
+        ):
+            self.slow_stop_all_spools()
+            return False, 'unsafe line health before staging pulse'
+
+        await self.move_direction_speed(
+            direction,
+            speed=speed_mps,
+            starting_pos=start_pos,
+            downward_bias=0,
+            key='default',
+            record_retry=False,
+        )
+        await asyncio.sleep(pulse_s)
+        self.input_velocities['default'] = np.zeros(3)
+        self.slow_stop_all_spools()
+        return True, 'ok'
+
+    async def _stage_partial_origin_card_for_spin(
+        self,
+        calibration_artifact,
+        safety_config,
+        zone_tolerance_m,
+        speed_mps,
+        settle_s,
+        gripper_check_s,
+    ):
+        max_steps = int(max(0, self._safety_number(
+            safety_config,
+            ('spinPartialCardMaxSteps', 'spin_partial_card_max_steps'),
+            CAL_SPIN_STAGE_PARTIAL_MAX_STEPS,
+        )))
+        pulse_s = self._safety_number(
+            safety_config,
+            ('spinPartialCardPulseS', 'spin_partial_card_pulse_s'),
+            CAL_SPIN_STAGE_PARTIAL_PULSE_S,
+        )
+        for step_idx in range(max_steps):
+            origin_detection = await self._wait_for_gripper_marker('origin', timeout_s=gripper_check_s)
+            if origin_detection is not None:
+                return True
+            hint = self._origin_card_partial_hint()
+            if hint is None:
+                if calibration_artifact is not None and step_idx == 0:
+                    calibration_artifact.record_observation(
+                        kind='spin_origin_partial_card_staging',
+                        ok=False,
+                        reason='no_partial_card_hint',
+                    )
+                return False
+            label, direction = self._spin_partial_card_direction(hint, step_idx)
+            if direction is None:
+                return False
+            pulse_ok, reason = await self._run_spin_staging_pulse(
+                direction,
+                speed_mps,
+                pulse_s,
+                safety_config,
+                zone_tolerance_m,
+                label=f'{label}_{step_idx}',
+                calibration_artifact=calibration_artifact,
+                step=step_idx,
+                hint=hint,
+            )
+            await asyncio.sleep(settle_s)
+            health_ok = self._spin_staging_line_health_ok(
+                calibration_artifact,
+                f'after_spin_origin_partial_card_step_{step_idx}',
+            )
+            origin_detection = await self._wait_for_gripper_marker('origin', timeout_s=gripper_check_s)
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='spin_origin_partial_card_staging',
+                    step=step_idx,
+                    label=label,
+                    pulse_ok=bool(pulse_ok),
+                    reason=reason,
+                    direction=list(map(float, direction)),
+                    hint=hint,
+                    origin_visible=origin_detection is not None,
+                )
+            if origin_detection is not None:
+                return True
+            if not pulse_ok or not health_ok:
+                return False
+        return await self._wait_for_gripper_marker('origin', timeout_s=gripper_check_s) is not None
+
+    async def stage_origin_for_spin_calibration(self, calibration_artifact=None):
+        """Use anchor camera views to make the origin card visible to the gripper camera."""
+        safety_config = self._calibration_safety_config()
+        max_steps = int(max(0, self._safety_number(
+            safety_config,
+            ('spinStagingMaxSteps', 'spin_staging_max_steps'),
+            CAL_SPIN_STAGE_MAX_STEPS,
+        )))
+        speed_mps = self._safety_number(
+            safety_config,
+            ('spinStagingSpeedMps', 'spin_staging_speed_mps'),
+            CAL_SPIN_STAGE_SPEED_MPS,
+        )
+        pulse_s = self._safety_number(
+            safety_config,
+            ('spinStagingPulseS', 'spin_staging_pulse_s'),
+            CAL_SPIN_STAGE_PULSE_S,
+        )
+        settle_s = self._safety_number(
+            safety_config,
+            ('spinStagingSettleS', 'spin_staging_settle_s'),
+            CAL_SPIN_STAGE_SETTLE_S,
+        )
+        min_improvement = self._safety_number(
+            safety_config,
+            ('spinStagingMinImprovement', 'spin_staging_min_improvement'),
+            CAL_SPIN_STAGE_MIN_IMPROVEMENT,
+        )
+        gripper_check_s = self._safety_number(
+            safety_config,
+            ('spinStagingGripperCheckS', 'spin_staging_gripper_check_s'),
+            CAL_SPIN_STAGE_GRIPPER_CHECK_S,
+        )
+        zone_tolerance_m = self._safety_number(
+            safety_config,
+            ('spinStagingZoneToleranceM', 'spin_staging_zone_tolerance_m'),
+            CAL_SPIN_STAGE_ZONE_TOLERANCE_M,
+        )
+
+        origin_detection = await self._wait_for_gripper_marker('origin', timeout_s=gripper_check_s)
+        if origin_detection is not None:
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='spin_origin_staging',
+                    skipped=True,
+                    reason='origin_already_visible_in_gripper',
+            )
+            return True
+
+        if await self._stage_partial_origin_card_for_spin(
+            calibration_artifact,
+            safety_config,
+            zone_tolerance_m,
+            speed_mps,
+            settle_s,
+            gripper_check_s,
+        ):
+            return True
+
+        current = self._spin_origin_anchor_alignment_snapshot()
+        if current is None:
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='spin_origin_staging',
+                    skipped=True,
+                    ok=False,
+                    reason='anchor cameras cannot see both origin and gantry',
+                )
+            return False
+
+        self.send_ui(operation_progress=telemetry.OperationProgress(
+            percent_complete=88.0,
+            name="Calibration",
+            current_action="Aligning origin with anchor cameras",
+        ))
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='spin_origin_staging_start',
+                alignment=current,
+                max_steps=max_steps,
+                speed_mps=speed_mps,
+                pulse_s=pulse_s,
+                settle_s=settle_s,
+                min_improvement=min_improvement,
+                zone_tolerance_m=zone_tolerance_m,
+            )
+
+        candidates = [
+            ('y_minus', np.array([0.0, -1.0, 0.0])),
+            ('y_plus', np.array([0.0, 1.0, 0.0])),
+            ('x_plus', np.array([1.0, 0.0, 0.0])),
+            ('x_minus', np.array([-1.0, 0.0, 0.0])),
+        ]
+        travel_m = float(speed_mps) * float(pulse_s)
+
+        for step_idx in range(max_steps):
+            if not self._spin_staging_line_health_ok(
+                calibration_artifact,
+                f'before_spin_origin_staging_step_{step_idx}',
+            ):
+                self.slow_stop_all_spools()
+                return False
+
+            kept_candidate = False
+            for label, direction in candidates:
+                start_pos = getattr(getattr(self, 'pe', None), 'gant_pos', None)
+                try:
+                    start_pos = np.asarray(start_pos, dtype=float).reshape(-1)[:3]
+                except (TypeError, ValueError):
+                    start_pos = None
+                if start_pos is None or start_pos.size < 3 or not np.all(np.isfinite(start_pos)):
+                    reason = 'no finite gantry position'
+                    if calibration_artifact is not None:
+                        calibration_artifact.record_observation(
+                            kind='spin_origin_staging_candidate',
+                            step=step_idx,
+                            label=label,
+                            accepted=False,
+                            reason=reason,
+                        )
+                    continue
+
+                target_pos = start_pos + direction * travel_m
+                ok, reason = self._calibration_point_safe(
+                    target_pos,
+                    f'spin_origin_staging_{step_idx}_{label}',
+                    safety_config,
+                    zone_margin_m=zone_tolerance_m,
+                )
+                if not ok:
+                    if calibration_artifact is not None:
+                        calibration_artifact.record_observation(
+                            kind='spin_origin_staging_candidate',
+                            step=step_idx,
+                            label=label,
+                            accepted=False,
+                            reason=reason,
+                            start_pos=start_pos,
+                            target_pos=target_pos,
+                        )
+                    continue
+
+                await self.move_direction_speed(
+                    direction,
+                    speed=speed_mps,
+                    starting_pos=start_pos,
+                    downward_bias=0,
+                    key='default',
+                    record_retry=False,
+                )
+                await asyncio.sleep(pulse_s)
+                self.input_velocities['default'] = np.zeros(3)
+                self.slow_stop_all_spools()
+                await asyncio.sleep(settle_s)
+
+                if not self._spin_staging_line_health_ok(
+                    calibration_artifact,
+                    f'after_spin_origin_staging_step_{step_idx}_{label}',
+                ):
+                    self.slow_stop_all_spools()
+                    return False
+
+                after = self._spin_origin_anchor_alignment_snapshot()
+                origin_detection = await self._wait_for_gripper_marker('origin', timeout_s=gripper_check_s)
+                if after is None:
+                    improvement = None
+                    accepted = origin_detection is not None
+                else:
+                    improvement = float(current['score'] - after['score'])
+                    accepted = origin_detection is not None or improvement >= min_improvement
+
+                if calibration_artifact is not None:
+                    calibration_artifact.record_observation(
+                        kind='spin_origin_staging_candidate',
+                        step=step_idx,
+                        label=label,
+                        accepted=bool(accepted),
+                        origin_visible=origin_detection is not None,
+                        improvement=improvement,
+                        before=current,
+                        after=after,
+                    )
+
+                if origin_detection is not None:
+                    return True
+
+                if accepted and after is not None:
+                    current = after
+                    kept_candidate = True
+                    break
+
+                reverse_start = getattr(getattr(self, 'pe', None), 'gant_pos', None)
+                try:
+                    reverse_start = np.asarray(reverse_start, dtype=float).reshape(-1)[:3]
+                except (TypeError, ValueError):
+                    reverse_start = start_pos + direction * travel_m
+                await self.move_direction_speed(
+                    -direction,
+                    speed=speed_mps,
+                    starting_pos=reverse_start,
+                    downward_bias=0,
+                    key='default',
+                    record_retry=False,
+                )
+                await asyncio.sleep(pulse_s)
+                self.input_velocities['default'] = np.zeros(3)
+                self.slow_stop_all_spools()
+                await asyncio.sleep(settle_s)
+
+            if not kept_candidate:
+                break
+
+        origin_detection = await self._wait_for_gripper_marker('origin', timeout_s=gripper_check_s)
+        ok = origin_detection is not None
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='spin_origin_staging_result',
+                ok=bool(ok),
+                final_alignment=self._spin_origin_anchor_alignment_snapshot(),
+                origin_visible=bool(ok),
+            )
+        return bool(ok)
+
+    def _calibration_start_line_geometry(self, raw_obs, anchor_poses, eyelet_positions, cam_tilts):
+        if self.config.anchor_type != common.AnchorType.ARPEGGIO:
+            return None
+
+        gantry_points = self._room_points_from_marker_observations(raw_obs, anchor_poses, 'gantry', cam_tilts)
+        if gantry_points:
+            gantry_pos = np.mean(np.asarray(gantry_points, dtype=float), axis=0)
+            gantry_source = 'anchor_camera_gantry_marker'
+        else:
+            gantry_pos = np.asarray(getattr(self.pe, 'visual_pos', None), dtype=float)
+            gantry_source = 'position_estimator_visual_fallback'
+
+        if gantry_pos.shape != (3,) or not np.all(np.isfinite(gantry_pos)):
+            logger.warning('Cannot compute calibration start line geometry without a valid gantry observation')
+            return None
+
+        try:
+            records = np.array([alr.getLast() for alr in self.datastore.anchor_line_record], dtype=float)
+        except Exception:
+            logger.exception('Cannot compute calibration start line geometry without line records')
+            return None
+
+        if records.ndim != 2 or records.shape[0] != N_LINES or records.shape[1] < 4:
+            logger.warning('Cannot compute calibration start line geometry from invalid line records shape=%s', getattr(records, 'shape', None))
+            return None
+
+        now = time.time()
+        ages = now - records[:, 0]
+        lengths = records[:, 1]
+        speeds = records[:, 2]
+        tensions = records[:, 3]
+        valid_records = (
+            np.all(np.isfinite(records[:, :4]), axis=1)
+            & (records[:, 0] > 0)
+            & (ages <= TENSION_RECORD_MAX_AGE_S)
+            & (lengths > 0)
+        )
+        usable_lines = valid_records & (tensions >= TENSION_THRESH)
+
+        pull_points = np.array([
+            compose_poses([anchor_poses[0], model_constants.arp_anchor_right_eyelet])[1],
+            eyelet_positions[0],
+            compose_poses([anchor_poses[1], model_constants.arp_anchor_right_eyelet])[1],
+            eyelet_positions[1],
+        ], dtype=float)
+        vectors = pull_points - gantry_pos
+        predicted_lengths = np.linalg.norm(vectors, axis=1)
+        xy_lengths = np.linalg.norm(vectors[:, :2], axis=1)
+        line_angles_deg = np.degrees(np.arctan2(xy_lengths, np.maximum(np.abs(vectors[:, 2]), 1e-9)))
+        length_residuals = predicted_lengths - lengths
+
+        geometry = {
+            'gantry_pos': list(map(float, gantry_pos)),
+            'gantry_source': gantry_source,
+            'gantry_observation_count': int(len(gantry_points)),
+            'line_lengths': list(map(float, lengths)),
+            'line_speeds': list(map(float, speeds)),
+            'tensions': list(map(float, tensions)),
+            'record_ages_s': list(map(float, ages)),
+            'usable_lines': list(map(bool, usable_lines)),
+            'pull_points': pull_points.tolist(),
+            'predicted_lengths': list(map(float, predicted_lengths)),
+            'length_residuals_m': list(map(float, length_residuals)),
+            'line_angles_deg': list(map(float, line_angles_deg)),
+            'tension_threshold_n': float(TENSION_THRESH),
+        }
+        logger.info(
+            'Calibration start line geometry: source=%s usable=%s angles_deg=%s length_residuals_m=%s',
+            gantry_source,
+            geometry['usable_lines'],
+            [round(v, 2) for v in geometry['line_angles_deg']],
+            [round(v, 3) for v in geometry['length_residuals_m']],
+        )
+        return geometry
+
+    def _eyelet_guesses_from_start_line_geometry(self, line_geometry, fallback_eyelets):
+        if line_geometry is None:
+            return fallback_eyelets
+        try:
+            gantry_pos = np.asarray(line_geometry.get('gantry_pos'), dtype=float)
+            line_lengths = np.asarray(line_geometry.get('line_lengths'), dtype=float)
+            usable_lines = np.asarray(line_geometry.get('usable_lines'), dtype=bool)
+            fallback_eyelets = np.asarray(fallback_eyelets, dtype=float)
+        except (AttributeError, TypeError, ValueError):
+            return fallback_eyelets
+        if gantry_pos.shape != (3,) or fallback_eyelets.shape != (2, 3) or line_lengths.shape[0] < 4 or usable_lines.shape[0] < 4:
+            return fallback_eyelets
+
+        guesses = fallback_eyelets.copy()
+        for eyelet_idx, line_idx in enumerate((1, 3)):
+            if not usable_lines[line_idx] or not np.isfinite(line_lengths[line_idx]) or line_lengths[line_idx] <= 0:
+                continue
+            direction = fallback_eyelets[eyelet_idx] - gantry_pos
+            norm = np.linalg.norm(direction)
+            if not np.isfinite(norm) or norm < 1e-6:
+                continue
+            guesses[eyelet_idx] = gantry_pos + direction / norm * line_lengths[line_idx]
+        return guesses
+
+    def save_poses_arp(self, anchor_poses, eyelet_positions, persist=True):
         # Use the optimization output to update anchor poses and spool params
         for anum, client in self.anchors.items():
             self.config.anchors[anum].pose = poseTupleToProto(anchor_poses[anum])
             self.config.anchors[anum].indirect_line.eyelet_pos = fromnp(eyelet_positions[anum])
             client.updatePoseAndEye(anchor_poses[anum], eyelet_positions[anum])
-        save_config(self.config, self.config_path)
+        if persist:
+            self._save_config_preserving_calibration_safety()
         # inform UI
         self.send_ui(new_anchor_poses=telemetry.AnchorPoses(
             poses=[poseTupleToProto(p) for p in anchor_poses],
@@ -1888,12 +3735,67 @@ class AsyncObserver:
         ])
         self.pe.set_anchor_points(anchor_points)
 
+    def _restore_calibration_config_state(self, saved_config):
+        if saved_config is None:
+            return
+        try:
+            self.config = saved_config
+            if self.config.anchor_type == common.AnchorType.ARPEGGIO:
+                anchor_poses = [None] * N_ANCHORS[self.config.anchor_type]
+                eyelet_positions = [None] * N_ANCHORS[self.config.anchor_type]
+                for anum, client in self.anchors.items():
+                    pose = poseProtoToTuple(self.config.anchors[anum].pose)
+                    eyelet = tonp(self.config.anchors[anum].indirect_line.eyelet_pos)
+                    anchor_poses[anum] = pose
+                    eyelet_positions[anum] = eyelet
+                    client.updatePoseAndEye(pose, eyelet)
+                anchor_poses = np.array(anchor_poses, dtype=float)
+                eyelet_positions = np.array(eyelet_positions, dtype=float)
+                self.send_ui(new_anchor_poses=telemetry.AnchorPoses(
+                    poses=[poseTupleToProto(p) for p in anchor_poses],
+                    eyelets=[fromnp(e) for e in eyelet_positions],
+                ))
+                anchor_points = np.array([
+                    compose_poses([anchor_poses[0], model_constants.arp_anchor_right_eyelet])[1],
+                    eyelet_positions[0],
+                    compose_poses([anchor_poses[1], model_constants.arp_anchor_right_eyelet])[1],
+                    eyelet_positions[1],
+                ])
+                self.pe.set_anchor_points(anchor_points)
+            else:
+                anchor_poses = [None] * N_ANCHORS[self.config.anchor_type]
+                for anum, client in self.anchors.items():
+                    pose = poseProtoToTuple(self.config.anchors[anum].pose)
+                    anchor_poses[anum] = pose
+                    client.updatePose(pose)
+                anchor_poses = np.array(anchor_poses, dtype=float)
+                self.send_ui(new_anchor_poses=telemetry.AnchorPoses(
+                    poses=[poseTupleToProto(p) for p in anchor_poses],
+                ))
+                anchor_points = np.array([
+                    compose_poses([pose, model_constants.anchor_grommet])[1]
+                    for pose in anchor_poses
+                ])
+                self.pe.set_anchor_points(anchor_points)
+        except Exception:
+            logger.exception('Failed to restore calibration config state after failed calibration')
+
     def _new_calibration_artifact(self, calibration_name):
         anchor_type = getattr(getattr(self, 'config', None), 'anchor_type', None)
+        safety_config = self._calibration_safety_config()
+        calibration_zone = self._calibration_zone(safety_config)
+        has_calibration_zone = calibration_zone is not None and np.asarray(calibration_zone).size > 0
         metadata = {
             'calibration_name': calibration_name,
             'anchor_type': getattr(anchor_type, 'name', str(anchor_type)),
             'config_path': getattr(self, 'config_path', None),
+            'calibration_safety': {
+                'mode': self._calibration_mode(safety_config),
+                'has_calibration_zone': has_calibration_zone,
+                'no_go_zone_count': len(self._calibration_no_go_zones(safety_config)),
+                'allow_degraded_reference': self._allow_degraded_reference_config(safety_config),
+                'degraded_reference_reset_allowed': self._allow_degraded_reference_reset(),
+            },
         }
         return CalibrationArtifactSession(metadata=metadata)
 
@@ -1906,6 +3808,876 @@ class AsyncObserver:
             logger.exception('Failed to write calibration artifact')
             return None
 
+    def _raw_config_dict(self):
+        path = getattr(self, 'config_path', None)
+        if not path:
+            return {}
+        try:
+            with open(path, 'r', encoding='utf-8') as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            logger.exception('Failed to read raw config for calibration safety settings')
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_config_preserving_calibration_safety(self):
+        raw_config = self._raw_config_dict()
+        safety_values = {
+            key: raw_config[key]
+            for key in ('calibrationSafety', 'calibration_safety', 'roomSafety', 'room_safety')
+            if key in raw_config
+        }
+
+        save_config(self.config, self.config_path)
+
+        if not safety_values:
+            return
+        try:
+            path = Path(self.config_path)
+            saved = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(saved, dict):
+                logger.warning('Cannot preserve calibration safety in non-object config file')
+                return
+            saved.update(safety_values)
+            tmp_path = path.with_name(f'.{path.name}.tmp')
+            tmp_path.write_text(json.dumps(saved, indent=2) + '\n', encoding='utf-8')
+            os.replace(tmp_path, path)
+        except Exception:
+            logger.exception('Failed to preserve calibration safety settings after config save')
+
+    def _calibration_safety_config(self):
+        raw_config = self._raw_config_dict()
+        safety = (
+            raw_config.get('calibrationSafety')
+            or raw_config.get('calibration_safety')
+            or raw_config.get('roomSafety')
+            or raw_config.get('room_safety')
+            or {}
+        )
+        if not isinstance(safety, dict):
+            logger.warning('Ignoring non-object calibrationSafety config: %r', safety)
+            return {}
+        return safety
+
+    def _calibration_mode(self, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        mode = (
+            safety_config.get('mode')
+            or safety_config.get('calibrationMode')
+            or safety_config.get('calibration_mode')
+        )
+        if mode is None:
+            if safety_config.get('allowDegradedReference') or safety_config.get('allow_degraded_reference'):
+                return 'constrained'
+            return 'full'
+        mode = str(mode).strip().lower().replace('-', '_')
+        if mode in ('full', 'constrained', 'manual_assisted'):
+            return mode
+        logger.warning('Ignoring invalid calibrationSafety mode=%r; using full', mode)
+        return 'full'
+
+    def _normalize_reachable_marker_name(self, name):
+        normalized = str(name or '').strip().lower().replace('-', '_').replace(' ', '_')
+        return REACHABLE_MARKER_ALIASES.get(normalized, normalized)
+
+    def _reachable_marker_names_for_safeguards(self, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        names = set(DEFAULT_REACHABLE_MARKER_NAMES)
+        for key in (
+            'reachableMarkers',
+            'reachable_markers',
+            'safeReachableMarkers',
+            'safe_reachable_markers',
+            'allowedReachableMarkers',
+            'allowed_reachable_markers',
+        ):
+            value = safety_config.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                values = [value]
+            elif isinstance(value, (list, tuple, set)):
+                values = value
+            else:
+                logger.warning('Ignoring non-list reachable marker config %s=%r', key, value)
+                continue
+            for item in values:
+                normalized = self._normalize_reachable_marker_name(item)
+                if normalized:
+                    names.add(normalized)
+        return names
+
+    def _is_reachable_marker_name(self, name, safety_config=None):
+        normalized = self._normalize_reachable_marker_name(name)
+        return normalized in self._reachable_marker_names_for_safeguards(safety_config)
+
+    def _safety_number(self, safety_config, names, default):
+        for name in names:
+            value = safety_config.get(name)
+            if value is None:
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                logger.warning('Ignoring invalid calibration safety number %s=%r', name, value)
+                continue
+            if np.isfinite(value):
+                return value
+        return default
+
+    def _xy_array(self, value):
+        try:
+            arr = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if arr.ndim == 1 and arr.size == 4:
+            arr = arr.reshape(2, 2)
+        if arr.ndim == 3 and arr.shape[1] == 1:
+            arr = arr[:, 0, :]
+        if arr.ndim != 2 or arr.shape[1] < 2 or len(arr) == 0:
+            return None
+        arr = arr[:, :2]
+        if not np.all(np.isfinite(arr)):
+            return None
+        return arr
+
+    def _calibration_zone(self, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        for key in ('calibrationZone', 'calibration_zone', 'safeProbeZone', 'safe_probe_zone', 'safeZone', 'safe_zone'):
+            zone = self._xy_array(safety_config.get(key))
+            if zone is not None and len(zone) >= 3:
+                return zone
+        return None
+
+    def _calibration_z_bounds(self, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        z_min = self._safety_number(
+            safety_config,
+            (
+                'calibrationZMinM', 'calibration_z_min_m',
+                'safeZMinM', 'safe_z_min_m',
+                'zMinM', 'z_min_m',
+                'minZ', 'min_z',
+            ),
+            None,
+        )
+        z_max = self._safety_number(
+            safety_config,
+            (
+                'calibrationZMaxM', 'calibration_z_max_m',
+                'safeZMaxM', 'safe_z_max_m',
+                'zMaxM', 'z_max_m',
+                'maxZ', 'max_z',
+            ),
+            None,
+        )
+        if z_min is None and z_max is None:
+            return None
+        if z_min is not None and z_max is not None and z_min > z_max:
+            logger.warning(
+                'Ignoring inverted calibration Z bounds: min=%s max=%s',
+                z_min,
+                z_max,
+            )
+            return None
+        return z_min, z_max
+
+    def _calibration_no_go_zones(self, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        raw_zones = (
+            safety_config.get('noGoZones')
+            or safety_config.get('no_go_zones')
+            or safety_config.get('catchRiskObjects')
+            or safety_config.get('catch_risk_objects')
+            or safety_config.get('obstacles')
+            or []
+        )
+        if not isinstance(raw_zones, list):
+            logger.warning('Ignoring non-list calibration no-go zones: %r', raw_zones)
+            return []
+
+        zones = []
+        default_margin = self._safety_number(
+            safety_config,
+            ('obstacleMarginM', 'obstacle_margin_m', 'marginM', 'margin_m'),
+            CAL_DEFAULT_OBSTACLE_MARGIN_M,
+        )
+        for index, raw_zone in enumerate(raw_zones):
+            if isinstance(raw_zone, dict):
+                name = str(raw_zone.get('name') or f'zone_{index}')
+                if self._is_reachable_marker_name(name, safety_config):
+                    logger.info(
+                        'Ignoring calibration no-go zone %s because it is a reachable marker target',
+                        name,
+                    )
+                    continue
+                margin = self._safety_number(raw_zone, ('marginM', 'margin_m', 'margin'), default_margin)
+                polygon = self._xy_array(raw_zone.get('polygon') or raw_zone.get('points'))
+                rect = self._xy_array(raw_zone.get('rect') or raw_zone.get('rectangle') or raw_zone.get('bounds'))
+                center = raw_zone.get('center')
+                radius = raw_zone.get('radiusM') or raw_zone.get('radius_m') or raw_zone.get('radius')
+            else:
+                name = f'zone_{index}'
+                margin = default_margin
+                polygon = self._xy_array(raw_zone)
+                rect = None
+                center = None
+                radius = None
+
+            if polygon is not None and len(polygon) >= 3:
+                zones.append({'kind': 'polygon', 'name': name, 'points': polygon, 'margin': margin})
+                continue
+            if rect is not None and len(rect) >= 2:
+                zones.append({'kind': 'rect', 'name': name, 'points': rect[:2], 'margin': margin})
+                continue
+            try:
+                center_arr = np.asarray(center, dtype=float).reshape(-1)[:2]
+                radius = float(radius)
+            except (TypeError, ValueError):
+                center_arr = None
+            if center_arr is not None and center_arr.size == 2 and np.all(np.isfinite(center_arr)) and np.isfinite(radius):
+                zones.append({'kind': 'circle', 'name': name, 'center': center_arr, 'radius': radius, 'margin': margin})
+                continue
+            logger.warning('Ignoring invalid calibration no-go zone %s: %r', index, raw_zone)
+        return zones
+
+    def _point_in_polygon_with_margin(self, point_xy, polygon_xy, margin_m=0.0):
+        contour = np.asarray(polygon_xy, dtype=np.float32)
+        distance = cv2.pointPolygonTest(contour, (float(point_xy[0]), float(point_xy[1])), True)
+        return bool(distance >= -float(margin_m))
+
+    def _point_in_zone(self, point_xy, zone):
+        point_xy = np.asarray(point_xy, dtype=float)
+        margin = float(zone.get('margin', 0.0))
+        if zone['kind'] == 'polygon':
+            return self._point_in_polygon_with_margin(point_xy, zone['points'], margin)
+        if zone['kind'] == 'rect':
+            bounds = np.asarray(zone['points'], dtype=float)
+            min_xy = np.min(bounds, axis=0) - margin
+            max_xy = np.max(bounds, axis=0) + margin
+            return bool(np.all(point_xy >= min_xy) and np.all(point_xy <= max_xy))
+        if zone['kind'] == 'circle':
+            return bool(np.linalg.norm(point_xy - zone['center']) <= float(zone['radius']) + margin)
+        return False
+
+    def _segment_hits_zone(self, start_xy, end_xy, zone):
+        start_xy = np.asarray(start_xy, dtype=float)
+        end_xy = np.asarray(end_xy, dtype=float)
+        length = float(np.linalg.norm(end_xy - start_xy))
+        samples = max(8, min(200, int(length / CAL_CABLE_SWEEP_SAMPLE_M) + 2))
+        for t in np.linspace(0.0, 1.0, samples):
+            point_xy = start_xy + (end_xy - start_xy) * t
+            if self._point_in_zone(point_xy, zone):
+                return True
+        return False
+
+    def _candidate_hits_recent_hazard(self, point_xy, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        radius = self._safety_number(
+            safety_config,
+            ('hazardAvoidRadiusM', 'hazard_avoid_radius_m'),
+            CAL_HAZARD_AVOID_RADIUS_M,
+        )
+        now = time.time()
+        for hazard in getattr(self, 'calibration_hazards', []):
+            hazard_point = hazard.get('point_xy')
+            if hazard_point is None:
+                continue
+            if now - hazard.get('ts', 0.0) > 300:
+                continue
+            if np.linalg.norm(np.asarray(point_xy, dtype=float) - np.asarray(hazard_point, dtype=float)) <= radius:
+                return hazard
+        return None
+
+    def _calibration_probe_safe(self, point_xy, label, safety_config=None, zone_margin_m=0.0):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        point_xy = np.asarray(point_xy, dtype=float)
+        pe = getattr(self, 'pe', None)
+        if pe is not None and not pe.point_inside_work_area_2d(point_xy):
+            return False, f'{label} outside solved work area'
+
+        calibration_zone = self._calibration_zone(safety_config)
+        if calibration_zone is not None and not self._point_in_polygon_with_margin(point_xy, calibration_zone, zone_margin_m):
+            return False, f'{label} outside configured calibration zone'
+
+        no_go_zones = self._calibration_no_go_zones(safety_config)
+        for zone in no_go_zones:
+            if self._point_in_zone(point_xy, zone):
+                return False, f'{label} inside no-go zone {zone["name"]}'
+
+        anchor_points = getattr(pe, 'anchor_points', None)
+        if anchor_points is not None:
+            try:
+                anchor_points = np.asarray(anchor_points, dtype=float)
+            except (TypeError, ValueError):
+                anchor_points = None
+        if anchor_points is not None and anchor_points.ndim == 2 and anchor_points.shape[1] >= 2:
+            for line_no, anchor_point in enumerate(anchor_points):
+                start_xy = anchor_point[:2]
+                for zone in no_go_zones:
+                    if self._segment_hits_zone(start_xy, point_xy, zone):
+                        return False, f'{label} cable sweep line {line_no} crosses no-go zone {zone["name"]}'
+
+        hazard = self._candidate_hits_recent_hazard(point_xy, safety_config)
+        if hazard is not None:
+            return False, f'{label} too close to recent calibration hazard {hazard.get("kind")}'
+
+        return True, 'ok'
+
+    def _calibration_point_safe(self, point_xyz, label, safety_config=None, zone_margin_m=0.0):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        try:
+            point = np.asarray(point_xyz, dtype=float).reshape(-1)
+        except (TypeError, ValueError):
+            point = None
+        if point is None or point.size < 2 or not np.all(np.isfinite(point[:2])):
+            return False, f'{label} has no finite xy position'
+
+        ok, reason = self._calibration_probe_safe(
+            point[:2],
+            label,
+            safety_config,
+            zone_margin_m=zone_margin_m,
+        )
+        if not ok:
+            return False, reason
+
+        z_bounds = self._calibration_z_bounds(safety_config)
+        if z_bounds is None:
+            return True, 'ok'
+        if point.size < 3 or not np.isfinite(point[2]):
+            return False, f'{label} has no finite z position'
+
+        z_min, z_max = z_bounds
+        if z_min is not None and point[2] < z_min:
+            return False, f'{label} below configured calibration z min {z_min:.3f}m'
+        if z_max is not None and point[2] > z_max:
+            return False, f'{label} above configured calibration z max {z_max:.3f}m'
+        return True, 'ok'
+
+    def _diamond_probe_safe(self, center_xy, half_h, half_w, safety_config=None):
+        labels = ('bottom', 'right', 'top', 'left')
+        points = self._diamond_probe_points(center_xy, half_h, half_w)
+        for label, point_xy in zip(labels, points):
+            ok, reason = self._calibration_probe_safe(point_xy, label, safety_config)
+            if not ok:
+                return False, reason
+        for from_label, to_label, start_xy, end_xy in zip(labels, labels[1:] + labels[:1], points, points[1:] + points[:1]):
+            distance = float(np.linalg.norm(end_xy - start_xy))
+            samples = max(2, min(80, int(distance / CAL_CABLE_SWEEP_SAMPLE_M) + 1))
+            for index, t in enumerate(np.linspace(0.0, 1.0, samples)):
+                point_xy = np.asarray(start_xy) + (np.asarray(end_xy) - np.asarray(start_xy)) * t
+                ok, reason = self._calibration_probe_safe(
+                    point_xy,
+                    f'{from_label}_to_{to_label}_{index}',
+                    safety_config,
+                )
+                if not ok:
+                    return False, reason
+        return True, 'ok'
+
+    def _calibration_initial_diamond_size(self, default_size=DIAMOND_SIZE, safety_config=None):
+        safety_config = self._calibration_safety_config() if safety_config is None else safety_config
+        default_half_h, default_half_w = [float(x) for x in default_size]
+        room_span = None
+        work_area = getattr(getattr(self, 'pe', None), 'work_area', None)
+        area_xy = self._xy_array(work_area)
+        if area_xy is not None and len(area_xy) >= 2:
+            span_xy = np.max(area_xy, axis=0) - np.min(area_xy, axis=0)
+            room_span = float(np.max(span_xy))
+        anchor_points = getattr(getattr(self, 'pe', None), 'anchor_points', None)
+        anchor_xy = self._xy_array(anchor_points)
+        if room_span is None and anchor_xy is not None and len(anchor_xy) >= 2:
+            span_xy = np.max(anchor_xy, axis=0) - np.min(anchor_xy, axis=0)
+            room_span = float(np.max(span_xy))
+
+        if room_span is None or not np.isfinite(room_span) or room_span <= 0:
+            half_h, half_w = default_half_h, default_half_w
+        else:
+            half_w = min(default_half_w, max(CAL_DIAMOND_MIN_HALF_WIDTH, room_span * 0.12))
+            half_h = min(default_half_h, max(CAL_DIAMOND_MIN_HALF_HEIGHT, room_span * 0.015))
+
+        max_half_w = self._safety_number(safety_config, ('maxProbeHalfWidthM', 'max_probe_half_width_m'), half_w)
+        max_half_h = self._safety_number(safety_config, ('maxProbeHalfHeightM', 'max_probe_half_height_m'), half_h)
+        min_half_w = self._safety_number(safety_config, ('minProbeHalfWidthM', 'min_probe_half_width_m'), CAL_DIAMOND_MIN_HALF_WIDTH)
+        min_half_h = self._safety_number(safety_config, ('minProbeHalfHeightM', 'min_probe_half_height_m'), CAL_DIAMOND_MIN_HALF_HEIGHT)
+        half_w = float(np.clip(half_w, min_half_w, max_half_w))
+        half_h = float(np.clip(half_h, min_half_h, max_half_h))
+        return half_h, half_w
+
+    def _snapshot_line_health(self, kind='line_health', **fields):
+        snapshot = {
+            'kind': kind,
+            'threshold_n': TENSION_THRESH if self.config.anchor_type == common.AnchorType.ARPEGGIO else 0.5,
+            'safe_tension_n': self._passive_safety_tension_limit(),
+        }
+        snapshot.update(fields)
+        if snapshot.get('threshold_n') is None:
+            snapshot['threshold_n'] = TENSION_THRESH if self.config.anchor_type == common.AnchorType.ARPEGGIO else 0.5
+        try:
+            records = np.array([alr.getLast() for alr in self.datastore.anchor_line_record], dtype=float)
+        except Exception:
+            logger.exception('Failed to snapshot calibration line health')
+            snapshot['valid'] = False
+            snapshot['error'] = 'line_record_read_failed'
+            return snapshot
+
+        if records.ndim != 2 or records.shape[0] != N_LINES or records.shape[1] < 4:
+            snapshot['valid'] = False
+            snapshot['error'] = f'invalid_record_shape_{records.shape}'
+            return snapshot
+
+        now = time.time()
+        ages = now - records[:, 0]
+        tensions = records[:, 3]
+        speeds = records[:, 2]
+        valid = bool(
+            np.all(np.isfinite(records[:, :4]))
+            and np.all(records[:, 0] > 0)
+            and np.all(ages <= TENSION_RECORD_MAX_AGE_S)
+        )
+        safe_tension = snapshot['safe_tension_n']
+        high_lines = [int(i) for i in np.where(tensions > safe_tension)[0]]
+        slack_lines = [int(i) for i in np.where(tensions < snapshot['threshold_n'])[0]]
+        line_action_states = self._arpeggio_line_action_states()
+        line_actions_by_line = {
+            int(state['line']): state
+            for state in line_action_states
+            if isinstance(state.get('line'), int)
+        }
+        snapshot.update({
+            'valid': valid,
+            'max_age_s': float(np.max(ages)) if np.all(np.isfinite(ages)) else None,
+            'speed_norm_mps': float(np.linalg.norm(speeds)) if np.all(np.isfinite(speeds)) else None,
+            'max_tension_n': float(np.max(tensions)) if np.all(np.isfinite(tensions)) else None,
+            'high_tension_lines': high_lines,
+            'slack_lines': slack_lines,
+            'line_action_states': line_action_states,
+            'lines': [
+                {
+                    'line': int(i),
+                    'age_s': float(ages[i]) if np.isfinite(ages[i]) else None,
+                    'length_m': float(records[i, 1]) if np.isfinite(records[i, 1]) else None,
+                    'speed_mps': float(records[i, 2]) if np.isfinite(records[i, 2]) else None,
+                    'tension_n': float(records[i, 3]) if np.isfinite(records[i, 3]) else None,
+                    **({'line_action_state': line_actions_by_line[i]} if i in line_actions_by_line else {}),
+                }
+                for i in range(N_LINES)
+            ],
+        })
+        return snapshot
+
+    def _record_calibration_line_health(self, artifact, kind='line_health', response_baseline_snapshot=None, **fields):
+        if artifact is None:
+            return None
+        snapshot = self._snapshot_line_health(kind=kind, **fields)
+        diagnostics = self._line_tension_response_diagnostics(
+            response_baseline_snapshot,
+            snapshot,
+            fields.get('requested_tension_lines'),
+        )
+        if diagnostics:
+            snapshot['tension_response_diagnostics'] = diagnostics
+            snapshot['tension_response_fault_lines'] = sorted({
+                int(item['line'])
+                for item in diagnostics
+                if 'line' in item and not item.get('responsive')
+            })
+        artifact.record_line_health(**snapshot)
+        return snapshot
+
+    def _arpeggio_line_action_states(self):
+        if self.config.anchor_type != common.AnchorType.ARPEGGIO:
+            return []
+
+        states = []
+        now = time.time()
+        for anchor_num, client in self.anchors.items():
+            raw_states = getattr(client, 'line_action_states', None) or []
+            for state in raw_states:
+                if not isinstance(state, dict):
+                    continue
+                try:
+                    spool_no = int(state.get('spool'))
+                    anchor_id = int(getattr(client, 'anchor_num', anchor_num))
+                except (TypeError, ValueError):
+                    continue
+                if spool_no not in (0, 1):
+                    continue
+                line_no = (anchor_id * 2) + spool_no
+                if line_no < 0 or line_no >= N_LINES:
+                    continue
+                normalized = dict(state)
+                normalized['anchor_num'] = anchor_id
+                normalized['spool'] = spool_no
+                normalized['line'] = line_no
+                try:
+                    normalized['age_s'] = max(0.0, now - float(normalized['ts']))
+                except (TypeError, ValueError, KeyError):
+                    pass
+                states.append(normalized)
+        return sorted(states, key=lambda item: int(item['line']))
+
+    def _line_tension_response_diagnostics(self, before_snapshot, after_snapshot, requested_lines):
+        if not requested_lines or not isinstance(before_snapshot, dict) or not isinstance(after_snapshot, dict):
+            return []
+        if not before_snapshot.get('valid', False) or not after_snapshot.get('valid', False):
+            return []
+
+        before_lines = {
+            int(line['line']): line
+            for line in before_snapshot.get('lines') or []
+            if isinstance(line, dict) and 'line' in line
+        }
+        after_lines = {
+            int(line['line']): line
+            for line in after_snapshot.get('lines') or []
+            if isinstance(line, dict) and 'line' in line
+        }
+        threshold = after_snapshot.get('threshold_n', before_snapshot.get('threshold_n', TENSION_THRESH))
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = TENSION_THRESH
+
+        diagnostics = []
+        for line_no in sorted({int(line) for line in requested_lines}):
+            before = before_lines.get(line_no)
+            after = after_lines.get(line_no)
+            if before is None or after is None:
+                continue
+            try:
+                before_length = float(before['length_m'])
+                after_length = float(after['length_m'])
+                before_tension = float(before['tension_n'])
+                after_tension = float(after['tension_n'])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if not np.all(np.isfinite([before_length, after_length, before_tension, after_tension])):
+                continue
+            if after_tension >= threshold:
+                continue
+
+            length_delta = after_length - before_length
+            tension_delta = after_tension - before_tension
+            abs_length_delta = abs(length_delta)
+            abs_tension_delta = abs(tension_delta)
+            reason = None
+            if (
+                abs_length_delta < CAL_TENSION_RESPONSE_MIN_LENGTH_DELTA_M
+                and abs_tension_delta < CAL_TENSION_RESPONSE_MIN_TENSION_DELTA_N
+            ):
+                reason = 'no_length_or_tension_response'
+                responsive = False
+            elif (
+                length_delta <= -CAL_TENSION_RESPONSE_MIN_LENGTH_DELTA_M
+                and tension_delta < CAL_TENSION_RESPONSE_MIN_TENSION_DELTA_N
+            ):
+                reason = 'reel_in_without_tension_gain'
+                responsive = True
+            elif abs_tension_delta < CAL_TENSION_RESPONSE_MIN_TENSION_DELTA_N:
+                reason = 'tension_nonresponsive'
+                responsive = False
+            else:
+                reason = 'tension_changed_but_below_target'
+                responsive = True
+            if reason is None:
+                continue
+
+            diagnostics.append({
+                'line': line_no,
+                'reason': reason,
+                'responsive': responsive,
+                'before_length_m': before_length,
+                'after_length_m': after_length,
+                'length_delta_m': length_delta,
+                'before_tension_n': before_tension,
+                'after_tension_n': after_tension,
+                'tension_delta_n': tension_delta,
+                'threshold_n': threshold,
+                'line_action_state': after.get('line_action_state'),
+            })
+        return diagnostics
+
+    def _line_tension_failure_message(self, snapshot=None):
+        if snapshot is None:
+            snapshot = self._snapshot_line_health(kind='line_tension_failure')
+        if not isinstance(snapshot, dict) or not snapshot.get('valid', False):
+            error = snapshot.get('error', 'invalid or stale line health') if isinstance(snapshot, dict) else 'line health unavailable'
+            return f'line tension did not settle: {error}'
+
+        tensions = []
+        for line in snapshot.get('lines') or []:
+            tension = line.get('tension_n')
+            tensions.append(None if tension is None else round(float(tension), 3))
+
+        slack_lines = snapshot.get('slack_lines') or []
+        high_lines = snapshot.get('high_tension_lines') or []
+        response_fault_lines = snapshot.get('tension_response_fault_lines') or []
+        threshold = snapshot.get('threshold_n')
+        if high_lines:
+            return f'line tension did not settle: high tension on lines {high_lines}; tensions={tensions} N'
+        if response_fault_lines:
+            diagnostics = snapshot.get('tension_response_diagnostics') or []
+            reasons = {
+                int(item['line']): item.get('reason', 'nonresponsive')
+                for item in diagnostics
+                if isinstance(item, dict) and 'line' in item
+            }
+            return (
+                'line tension did not settle: nonresponsive lines '
+                f'{response_fault_lines}; reasons={reasons}; threshold={threshold} N; '
+                f'tensions={tensions} N'
+            )
+        if slack_lines:
+            return f'line tension did not settle: slack lines {slack_lines}; threshold={threshold} N; tensions={tensions} N'
+        return f'line tension did not settle: speed_norm={snapshot.get("speed_norm_mps")}; tensions={tensions} N'
+
+    def _record_calibration_hazard(self, kind, lines=None, message=None, point_xy=None, **fields):
+        fatal = bool(fields.pop('fatal', True))
+        if point_xy is None:
+            point = getattr(getattr(self, 'pe', None), 'gant_pos', None)
+            if point is not None:
+                try:
+                    point_xy = np.asarray(point, dtype=float).reshape(-1)[:2]
+                except (TypeError, ValueError):
+                    point_xy = None
+        hazard = {
+            'kind': kind,
+            'lines': [int(line) for line in (lines or [])],
+            'message': message,
+            'ts': time.time(),
+            'fatal': fatal,
+        }
+        if point_xy is not None:
+            hazard['point_xy'] = np.asarray(point_xy, dtype=float).reshape(-1)[:2].tolist()
+        hazard.update(fields)
+        self.calibration_hazards.append(hazard)
+        logger.warning('Recorded calibration hazard: %s', hazard)
+        return hazard
+
+    def _latest_calibration_hazard(self, fatal_only=False):
+        hazards = getattr(self, 'calibration_hazards', None)
+        if not hazards:
+            return None
+        for hazard in reversed(hazards):
+            if not fatal_only or hazard.get('fatal', True):
+                return hazard
+        return None
+
+    def _fail_on_calibration_hazard(self, artifact=None, phase=None):
+        hazard = self._latest_calibration_hazard(fatal_only=True)
+        if hazard is None:
+            return False
+        message = f'Calibration stopped after hazard: {hazard.get("message") or hazard.get("kind")}'
+        if artifact is not None:
+            artifact.fail(message, phase=phase or getattr(artifact, 'phase', None), hazard=hazard)
+        logger.warning(message)
+        return True
+
+    def _calibration_health_report(self, artifact):
+        snapshot = artifact.snapshot() if artifact is not None else {}
+        safety_config = self._calibration_safety_config()
+        mode = self._calibration_mode(safety_config)
+        score = 100
+        reasons = []
+        degraded_reference_count = int(getattr(self, '_calibration_degraded_reference_count', 0))
+        if degraded_reference_count:
+            if mode == 'full':
+                score -= 40
+                reasons.append(f'degraded reference reset used in full mode: {degraded_reference_count}')
+            else:
+                score -= 10
+                reasons.append(f'{mode} mode used degraded reference reset: {degraded_reference_count}')
+        failures = snapshot.get('failures') or []
+        if failures:
+            score -= 50
+            reasons.append('artifact contains failures')
+
+        observations = snapshot.get('observations') or []
+        raw_marker_snapshots = [
+            obs for obs in observations
+            if obs.get('kind') == 'raw_marker_snapshot'
+        ]
+        if raw_marker_snapshots:
+            marker_counts = raw_marker_snapshots[-1].get('marker_counts') or {}
+            origin_counts = marker_counts.get('origin') or []
+            if sum(1 for count in origin_counts if count > 0) < min(2, max(1, len(origin_counts))):
+                score -= 20
+                reasons.append(f'origin visual coverage weak: {origin_counts}')
+            gantry_counts = marker_counts.get('gantry') or []
+            if gantry_counts and sum(1 for count in gantry_counts if count > 0) < min(2, max(1, len(gantry_counts))):
+                score -= 15
+                reasons.append(f'gantry visual coverage weak before solve: {gantry_counts}')
+        else:
+            score -= 10
+            reasons.append('no raw marker visual coverage snapshot')
+
+        diamond_observations = [
+            obs for obs in observations
+            if obs.get('kind') == 'arpeggio_diamond'
+        ]
+        if diamond_observations:
+            diamond_counts = diamond_observations[-1].get('gantry_counts') or {}
+            line_deltas = diamond_observations[-1].get('line_deltas') or {}
+            weak_states = {
+                state: counts
+                for state, counts in diamond_counts.items()
+                if sum(1 for count in counts if count > 0) < min(2, max(1, len(counts)))
+            }
+            if weak_states:
+                score -= 25
+                reasons.append(f'diamond visual coverage weak: {weak_states}')
+            expected_delta_keys = ('bot_to_rig', 'rig_to_top', 'top_to_lef')
+            missing_delta_keys = [key for key in expected_delta_keys if key not in line_deltas]
+            if missing_delta_keys:
+                score -= 20
+                reasons.append(f'missing measured line deltas: {missing_delta_keys}')
+            else:
+                try:
+                    delta_values = np.array([line_deltas[key] for key in expected_delta_keys], dtype=float)
+                except (TypeError, ValueError):
+                    delta_values = None
+                if delta_values is None or delta_values.shape != (3, 2) or not np.all(np.isfinite(delta_values)):
+                    score -= 25
+                    reasons.append(f'invalid measured line deltas: {line_deltas}')
+                elif np.any(np.abs(delta_values) < 0.005):
+                    score -= 10
+                    reasons.append(f'very small measured line deltas: {delta_values.tolist()}')
+        elif self.config.anchor_type == common.AnchorType.ARPEGGIO:
+            score -= 20
+            reasons.append('no arpeggio diamond visual coverage snapshot')
+
+        diamond_plans = [
+            obs for obs in observations
+            if obs.get('kind') == 'adaptive_diamond_plan'
+        ]
+        if diamond_plans:
+            plan = diamond_plans[-1]
+            half_h = plan.get('half_height_m')
+            half_w = plan.get('half_width_m')
+            if half_h is not None and half_w is not None:
+                if half_h <= CAL_DIAMOND_MIN_HALF_HEIGHT * 1.1 or half_w <= CAL_DIAMOND_MIN_HALF_WIDTH * 1.1:
+                    score -= 10
+                    reasons.append(f'calibration probe coverage near minimum: half_h={half_h}, half_w={half_w}')
+        elif self.config.anchor_type == common.AnchorType.ARPEGGIO:
+            score -= 10
+            reasons.append('no adaptive diamond plan recorded')
+
+        optimizer_reports = snapshot.get('optimizer_reports') or []
+        failed_optimizers = [
+            report.get('name')
+            for report in optimizer_reports
+            if report.get('success') is False
+        ]
+        if failed_optimizers:
+            score -= 25
+            reasons.append(f'failed optimizer reports: {failed_optimizers}')
+
+        line_health = self._snapshot_line_health(kind='completion_health')
+        if not line_health.get('valid', False):
+            score -= 20
+            reasons.append(f'line health invalid: {line_health.get("error", "stale_or_invalid")}')
+        if line_health.get('high_tension_lines'):
+            score -= 30
+            reasons.append(f'high tension lines: {line_health["high_tension_lines"]}')
+        if len(getattr(self, 'calibration_hazards', [])) > 0:
+            score -= min(20, len(getattr(self, 'calibration_hazards', [])) * 5)
+            reasons.append('calibration hazards recorded')
+
+        score = max(0, int(score))
+        return {
+            'ok': (
+                score >= CAL_HEALTH_MIN_SCORE
+                and not failures
+                and not failed_optimizers
+                and not line_health.get('high_tension_lines')
+                and not (mode == 'full' and degraded_reference_count)
+            ),
+            'score': score,
+            'min_score': CAL_HEALTH_MIN_SCORE,
+            'mode': mode,
+            'degraded_reference_count': degraded_reference_count,
+            'reasons': reasons,
+            'line_health': line_health,
+        }
+
+    def _calibration_safety_report(self):
+        safety_config = self._calibration_safety_config()
+        zones = []
+        for zone in self._calibration_no_go_zones(safety_config):
+            item = {
+                'name': zone.get('name'),
+                'kind': zone.get('kind'),
+                'margin_m': zone.get('margin'),
+            }
+            if zone.get('kind') in ('polygon', 'rect'):
+                item['points'] = zone.get('points')
+            elif zone.get('kind') == 'circle':
+                item['center'] = zone.get('center')
+                item['radius_m'] = zone.get('radius')
+            zones.append(item)
+        return {
+            'mode': self._calibration_mode(safety_config),
+            'safe_probe_center_xy': self._diamond_center_xy(),
+            'calibration_zone': self._calibration_zone(safety_config),
+            'calibration_z_bounds_m': self._calibration_z_bounds(safety_config),
+            'no_go_zones': zones,
+            'reachable_marker_targets': sorted(self._reachable_marker_names_for_safeguards(safety_config)),
+            'allow_degraded_reference': self._allow_degraded_reference_config(safety_config),
+            'degraded_reference_reset_allowed': self._allow_degraded_reference_reset(),
+            'manual_assist_timeout_s': self._manual_assist_reference_timeout(),
+            'safe_motion_validation_skipped': bool(
+                safety_config.get('skipSafeMotionValidation')
+                or safety_config.get('skip_safe_motion_validation')
+            ),
+        }
+
+    def _calibration_failure_summary(self, artifact, default='Calibration failed'):
+        if artifact is None:
+            return default
+        try:
+            snapshot = artifact.snapshot()
+        except Exception:
+            logger.exception('Failed to build calibration failure summary')
+            return default
+
+        failures = snapshot.get('failures') or []
+        if failures:
+            for latest_failure in reversed(failures):
+                message = latest_failure.get('message')
+                if not message:
+                    continue
+                if message == 'calibration failed' and latest_failure.get('exception') and len(failures) > 1:
+                    continue
+                health = latest_failure.get('health')
+                if isinstance(health, dict) and health.get('reasons'):
+                    return f'{message}: {health["reasons"]}'
+                return str(message)
+
+        line_samples = snapshot.get('line_health_samples') or []
+        for sample in reversed(line_samples):
+            high_lines = sample.get('high_tension_lines') or []
+            if high_lines:
+                return f'Calibration failed: high tension on lines {high_lines}'
+            if sample.get('valid') is False:
+                return f'Calibration failed: invalid or stale line health ({sample.get("error", "unknown")})'
+
+        observations = snapshot.get('observations') or []
+        for obs in reversed(observations):
+            if obs.get('kind') == 'safe_motion_validation_plan' and not obs.get('safe_candidates'):
+                rejected = obs.get('rejected') or []
+                return f'Calibration failed: no safe validation moves fit constraints ({rejected})'
+            if obs.get('kind') == 'adaptive_diamond_plan':
+                search = obs.get('search') or {}
+                failure_reason = search.get('failure_reason')
+                if failure_reason:
+                    return f'Calibration failed: no safe adaptive diamond ({failure_reason})'
+
+        return default
+
     def _origin_detection_counts(self):
         return {
             int(getattr(client, 'anchor_num', anchor_num)): len(client.origin_poses['origin'])
@@ -1916,6 +4688,19 @@ class AsyncObserver:
         return sorted([anum for anum, count in counts.items() if count > 0])
 
     def _diamond_center_xy(self):
+        safety_config = self._calibration_safety_config()
+        for key in ('safeProbeCenter', 'safe_probe_center', 'calibrationCenter', 'calibration_center'):
+            center = safety_config.get(key)
+            if center is None:
+                continue
+            try:
+                center = np.asarray(center, dtype=float).reshape(-1)[:2]
+            except (TypeError, ValueError):
+                logger.warning('Ignoring invalid calibration probe center %s=%r', key, center)
+                continue
+            if center.size == 2 and np.all(np.isfinite(center)):
+                return center
+
         pe = getattr(self, 'pe', None)
         for attr in ('visual_pos', 'gant_pos', 'hang_pos'):
             point = getattr(pe, attr, None)
@@ -1949,32 +4734,59 @@ class AsyncObserver:
         ]
 
     def _adaptive_diamond_size(self, default_size=DIAMOND_SIZE):
-        """Shrink the Arpeggio diamond to fit the configured work area, if any."""
-        half_h, half_w = [float(x) for x in default_size]
+        """Choose the largest calibration diamond that fits room bounds, no-go zones, and recent hazards."""
+        safety_config = self._calibration_safety_config()
+        half_h, half_w = self._calibration_initial_diamond_size(default_size, safety_config)
         pe = getattr(self, 'pe', None)
         work_area = getattr(pe, 'work_area', None)
-        if pe is None or work_area is None:
+        if pe is None:
             return half_h, half_w
 
-        try:
-            if np.asarray(work_area).size == 0:
-                return half_h, half_w
-        except (TypeError, ValueError):
-            raise RuntimeError(f'Invalid work area for diamond calibration: {work_area}')
+        if work_area is not None:
+            try:
+                if np.asarray(work_area).size == 0:
+                    return half_h, half_w
+            except (TypeError, ValueError):
+                raise RuntimeError(f'Invalid work area for diamond calibration: {work_area}')
 
         center_xy = self._diamond_center_xy()
+        plan = {
+            'kind': 'adaptive_diamond_size_search',
+            'mode': self._calibration_mode(safety_config),
+            'center_xy': center_xy,
+            'initial_half_height_m': half_h,
+            'initial_half_width_m': half_w,
+            'min_half_height_m': CAL_DIAMOND_MIN_HALF_HEIGHT,
+            'min_half_width_m': CAL_DIAMOND_MIN_HALF_WIDTH,
+            'shrink_factor': CAL_DIAMOND_SHRINK_FACTOR,
+            'candidates': [],
+            'selected': None,
+        }
+        last_reason = 'unknown'
         for _ in range(16):
             if half_h < CAL_DIAMOND_MIN_HALF_HEIGHT or half_w < CAL_DIAMOND_MIN_HALF_WIDTH:
                 break
-            probe_points = self._diamond_probe_points(center_xy, half_h, half_w)
-            if all(pe.point_inside_work_area_2d(point) for point in probe_points):
+            safe, reason = self._diamond_probe_safe(center_xy, half_h, half_w, safety_config)
+            candidate = {
+                'half_height_m': half_h,
+                'half_width_m': half_w,
+                'safe': bool(safe),
+                'reason': reason,
+            }
+            plan['candidates'].append(candidate)
+            if safe:
+                plan['selected'] = candidate
+                self._last_adaptive_diamond_plan = plan
                 return half_h, half_w
-            half_h *= 0.75
-            half_w *= 0.75
+            last_reason = reason
+            half_h *= CAL_DIAMOND_SHRINK_FACTOR
+            half_w *= CAL_DIAMOND_SHRINK_FACTOR
 
+        plan['failure_reason'] = last_reason
+        self._last_adaptive_diamond_plan = plan
         raise RuntimeError(
-            'No safe Arpeggio eyelet calibration diamond fits the configured work area '
-            f'around center {center_xy}'
+            'No safe Arpeggio eyelet calibration diamond fits the configured room constraints '
+            f'around center {center_xy}: {last_reason}'
         )
 
     def _require_gantry_observations(self, label, min_anchor_count=1):
@@ -2022,7 +4834,7 @@ class AsyncObserver:
             self.slow_stop_all_spools()
 
 
-    async def collect_arp_anchor_eyelet_experiment_data(self, anchor_poses):
+    async def collect_arp_anchor_eyelet_experiment_data(self, anchor_poses, calibration_artifact=None):
         """  
         Perform experiments in which only the eyelet lines are tight and a diamond pattern is observed
         """
@@ -2031,6 +4843,17 @@ class AsyncObserver:
         try:
             for a in self.anchors.values():
                 a.save_raw = True
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='eyelet_probe_start',
+            )
+
+            await self.return_to_calibration_start_envelope(
+                calibration_artifact,
+                phase='arpeggio_eyelet_probe',
+            )
+            if not await self.wait_for_safe_calibration_start_position(calibration_artifact):
+                raise RuntimeError('Calibration start position is outside the safe calibration envelope')
             
             # move to the center of the room.
 
@@ -2038,6 +4861,12 @@ class AsyncObserver:
             await self.touch_floor()
 
             self.slow_stop_all_spools()
+            if self._fail_on_calibration_hazard(calibration_artifact, phase='arpeggio_eyelet_probe'):
+                raise RuntimeError('Calibration stopped after hazard during floor touch')
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='after_touch_floor',
+            )
 
             logger.info('Relax the direct lines, tighten the indirect line')
 
@@ -2060,6 +4889,11 @@ class AsyncObserver:
                 print((t0,t2))
             await self.send_line_speed(0, 0)
             await self.send_line_speed(2, 0)
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='after_direct_line_relax',
+                direct_tension=list(map(float, get_direct_tensions())),
+            )
             # another 30 cm
             await self.send_line_speed(0,  0.3, jog=True)
             await self.send_line_speed(2,  0.3, jog=True)
@@ -2070,12 +4904,25 @@ class AsyncObserver:
 
             await asyncio.sleep(1)
             self.slow_stop_all_spools()
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='after_indirect_line_tighten',
+            )
 
             half_h, half_w = self._adaptive_diamond_size()
             logger.info(
                 f'Using Arpeggio calibration diamond half-height={half_h:.3f}m '
                 f'half-width={half_w:.3f}m'
             )
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='adaptive_diamond_plan',
+                    center_xy=self._diamond_center_xy(),
+                    half_height_m=half_h,
+                    half_width_m=half_w,
+                    safety_config=self._calibration_safety_config(),
+                    search=getattr(self, '_last_adaptive_diamond_plan', None),
+                )
 
             results = {}
             line_deltas = {}
@@ -2094,6 +4941,10 @@ class AsyncObserver:
             logger.info('This position is the bottom of the diamond. Observe gantry for 2 seconds')
             await asyncio.sleep(5)
             results['bottom'] = self._require_gantry_observations('bottom')
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='diamond_bottom_observed',
+            )
 
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=25.0,
@@ -2103,11 +4954,25 @@ class AsyncObserver:
             # RIGHT:
             logger.info('Move to RIGHT')
             l1_before, l3_before = get_eyelet_lengths()
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='diamond_move_command',
+                    transition='bottom_to_right',
+                    line_commands={
+                        'line1_jog_m': -half_w-half_h,
+                        'line3_jog_m': half_w-half_h,
+                        'line0_jog_m': 0.3,
+                        'line2_jog_m': 0.3,
+                    },
+                    lengths_before={'line1': l1_before, 'line3': l3_before},
+                )
             await self.send_line_speed(1, -half_w-half_h, jog=True)
             await self.send_line_speed(3, half_w-half_h, jog=True)
             await self.send_line_speed(0,  0.3, jog=True)
             await self.send_line_speed(2,  0.3, jog=True)
             await self._wait_for_diamond_lines_to_stop()
+            if self._fail_on_calibration_hazard(calibration_artifact, phase='arpeggio_eyelet_probe'):
+                raise RuntimeError('Calibration stopped after hazard during bottom_to_right probe')
             await self.send_line_speed(1, 0)
             await self.send_line_speed(3, 0)
             l1_after, l3_after = get_eyelet_lengths()
@@ -2115,6 +4980,11 @@ class AsyncObserver:
             logger.info(f'bot_to_rig actual deltas: line1={line_deltas["bot_to_rig"][0]:.4f}, line3={line_deltas["bot_to_rig"][1]:.4f}')
             await asyncio.sleep(5)
             results['right'] = self._require_gantry_observations('right') # it is to the right from the perspective of camera 0
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='diamond_right_observed',
+                line_deltas={'line1': line_deltas['bot_to_rig'][0], 'line3': line_deltas['bot_to_rig'][1]},
+            )
 
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=30.0,
@@ -2124,9 +4994,21 @@ class AsyncObserver:
             # TOP:
             logger.info('Move to TOP')
             l1_before, l3_before = get_eyelet_lengths()
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='diamond_move_command',
+                    transition='right_to_top',
+                    line_commands={
+                        'line1_jog_m': half_w-half_h,
+                        'line3_jog_m': -half_w-half_h,
+                    },
+                    lengths_before={'line1': l1_before, 'line3': l3_before},
+                )
             await self.send_line_speed(1, half_w-half_h, jog=True)
             await self.send_line_speed(3, -half_w-half_h, jog=True)
             await self._wait_for_diamond_lines_to_stop()
+            if self._fail_on_calibration_hazard(calibration_artifact, phase='arpeggio_eyelet_probe'):
+                raise RuntimeError('Calibration stopped after hazard during right_to_top probe')
             await self.send_line_speed(1, 0)
             await self.send_line_speed(3, 0)
             l1_after, l3_after = get_eyelet_lengths()
@@ -2134,6 +5016,11 @@ class AsyncObserver:
             logger.info(f'rig_to_top actual deltas: line1={line_deltas["rig_to_top"][0]:.4f}, line3={line_deltas["rig_to_top"][1]:.4f}')
             await asyncio.sleep(5)
             results['top'] = self._require_gantry_observations('top')
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='diamond_top_observed',
+                line_deltas={'line1': line_deltas['rig_to_top'][0], 'line3': line_deltas['rig_to_top'][1]},
+            )
 
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=35.0,
@@ -2143,11 +5030,25 @@ class AsyncObserver:
             # LEFT:
             logger.info('Move to LEFT')
             l1_before, l3_before = get_eyelet_lengths()
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='diamond_move_command',
+                    transition='top_to_left',
+                    line_commands={
+                        'line1_jog_m': half_w+half_h,
+                        'line3_jog_m': -half_w+half_h,
+                        'line0_jog_m': 0.1,
+                        'line2_jog_m': 0.1,
+                    },
+                    lengths_before={'line1': l1_before, 'line3': l3_before},
+                )
             await self.send_line_speed(1, half_w+half_h, jog=True)
             await self.send_line_speed(3, -half_w+half_h, jog=True)
             await self.send_line_speed(0,  0.1, jog=True)
             await self.send_line_speed(2,  0.1, jog=True)
             await self._wait_for_diamond_lines_to_stop()
+            if self._fail_on_calibration_hazard(calibration_artifact, phase='arpeggio_eyelet_probe'):
+                raise RuntimeError('Calibration stopped after hazard during top_to_left probe')
             await self.send_line_speed(1, 0)
             await self.send_line_speed(3, 0)
             l1_after, l3_after = get_eyelet_lengths()
@@ -2155,6 +5056,11 @@ class AsyncObserver:
             logger.info(f'top_to_lef actual deltas: line1={line_deltas["top_to_lef"][0]:.4f}, line3={line_deltas["top_to_lef"][1]:.4f}')
             await asyncio.sleep(5)
             results['left'] = self._require_gantry_observations('left')
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='diamond_left_observed',
+                line_deltas={'line1': line_deltas['top_to_lef'][0], 'line3': line_deltas['top_to_lef'][1]},
+            )
 
             # set back anti tangle to normal function 
             await self._set_arp_direct_line_anti_tangle(True)
@@ -2173,7 +5079,7 @@ class AsyncObserver:
             self.slow_stop_all_spools()
             await self._restore_calibration_cleanup()
     
-    async def half_auto_calibration(self):
+    async def half_auto_calibration(self, calibration_artifact=None, phase='half_auto_calibration'):
         """
         Set line lengths from observation
         tighten, wait for obs, estimate line lengths, move up slightly, estimate line lengths, move down slightly
@@ -2181,6 +5087,11 @@ class AsyncObserver:
         """
         NUM_SAMPLE_POINTS = 3
         OPTIMIZER_TIMEOUT_S = 60  # seconds
+        previous_calibration_active = getattr(self, '_calibration_active', False)
+        previous_line_tension_profiles = getattr(self, '_calibration_line_tension_profiles', None)
+        if not previous_calibration_active:
+            self._calibration_line_tension_profiles = None
+        self._calibration_active = True
         
         try:
             if len(self.anchors) < N_ANCHORS[self.config.anchor_type]:
@@ -2193,11 +5104,18 @@ class AsyncObserver:
                 need_sc_restart = True
 
             for direction in [[0,0,1], [0,0,-1]]:
-                if not await self.tension_and_wait():
+                self._record_calibration_line_health(
+                    calibration_artifact,
+                    kind='half_calibration_step_start',
+                    calibration_phase=phase,
+                    direction=direction,
+                )
+                if not await self.tension_and_wait(calibration_artifact, phase=phase):
+                    tension_message = getattr(self, '_last_tension_failure_message', None) or 'line tension did not settle'
                     self.send_ui(operation_progress=telemetry.OperationProgress(
                         percent_complete=100.0,
                         name="Calibration",
-                        current_action="Calibration failed: line tension did not settle",
+                        current_action=f"Calibration failed: {tension_message}",
                     ))
                     return False
                 # wait for some new obs
@@ -2205,17 +5123,40 @@ class AsyncObserver:
                 lengths = np.linalg.norm(self.pe.anchor_points - self.pe.visual_pos, axis=1)
                 if not await self.sendReferenceLengths(lengths):
                     self.slow_stop_all_spools()
+                    self._record_calibration_line_health(
+                        calibration_artifact,
+                        kind='reference_length_reset_failed',
+                        calibration_phase=phase,
+                        direction=direction,
+                        attempted_lengths=list(map(float, lengths)),
+                        gantry_visual_reference=self._gantry_reference_observation_summary(),
+                    )
                     self.send_ui(operation_progress=telemetry.OperationProgress(
                         percent_complete=100.0,
                         name="Calibration",
                         current_action="Calibration failed: reference length data was invalid",
                     ))
                     return False
+                self._record_calibration_line_health(
+                    calibration_artifact,
+                    kind='reference_length_reset_ok',
+                    calibration_phase=phase,
+                    direction=direction,
+                    reference_lengths=list(map(float, lengths)),
+                    degraded_reference=bool(getattr(self, '_last_reference_reset_degraded', False)),
+                    gantry_visual_reference=self._gantry_reference_observation_summary(),
+                )
                 await asyncio.sleep(0.25)
                 # move in direction for short time
                 await self.move_direction_speed(direction, 0.05, downward_bias=0)
                 await asyncio.sleep(0.25)
                 self.slow_stop_all_spools()
+                self._record_calibration_line_health(
+                    calibration_artifact,
+                    kind='half_calibration_step_moved',
+                    calibration_phase=phase,
+                    direction=direction,
+                )
 
             if need_sc_restart:
                 self.swing_cancellation_task = asyncio.create_task(self.run_swing_cancellation())
@@ -2223,12 +5164,388 @@ class AsyncObserver:
 
         except asyncio.CancelledError:
             raise
+        finally:
+            self._calibration_active = previous_calibration_active
+            if not previous_calibration_active:
+                self._calibration_line_tension_profiles = previous_line_tension_profiles
+
+    async def validate_calibration_safe_motion(self, calibration_artifact=None):
+        """Run a tiny, separately recorded motion validation inside the safe calibration envelope."""
+        safety_config = self._calibration_safety_config()
+        if safety_config.get('skipSafeMotionValidation') or safety_config.get('skip_safe_motion_validation'):
+            if calibration_artifact is not None:
+                calibration_artifact.warn('safe motion validation skipped by config')
+            logger.warning('Safe motion validation skipped by calibrationSafety config')
+            return True
+
+        distance_m = self._safety_number(
+            safety_config,
+            ('validationDistanceM', 'validation_distance_m'),
+            CAL_SAFE_VALIDATION_DISTANCE_M,
+        )
+        speed_mps = self._safety_number(
+            safety_config,
+            ('validationSpeedMps', 'validation_speed_mps'),
+            CAL_SAFE_VALIDATION_SPEED_MPS,
+        )
+        settle_s = self._safety_number(
+            safety_config,
+            ('validationSettleS', 'validation_settle_s'),
+            CAL_SAFE_VALIDATION_SETTLE_S,
+        )
+
+        start_pos = np.asarray(self.pe.gant_pos, dtype=float)
+        if start_pos.shape[0] < 3 or not np.all(np.isfinite(start_pos[:3])):
+            if calibration_artifact is not None:
+                calibration_artifact.fail('safe motion validation has no finite gantry position')
+            return False
+
+        candidate_vectors = [
+            ('x_plus', np.array([1.0, 0.0, 0.0])),
+            ('x_minus', np.array([-1.0, 0.0, 0.0])),
+            ('y_plus', np.array([0.0, 1.0, 0.0])),
+            ('y_minus', np.array([0.0, -1.0, 0.0])),
+            ('z_up', np.array([0.0, 0.0, 1.0])),
+        ]
+        safe_candidates = []
+        rejected = []
+        for label, direction in candidate_vectors:
+            target = start_pos + direction * distance_m
+            ok, reason = self._calibration_point_safe(target, f'validation_{label}', safety_config)
+            if ok:
+                safe_candidates.append((label, direction))
+            else:
+                rejected.append({'label': label, 'reason': reason})
+
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='safe_motion_validation_plan',
+                start_pos=start_pos[:3],
+                distance_m=distance_m,
+                speed_mps=speed_mps,
+                safe_candidates=[label for label, _ in safe_candidates],
+                rejected=rejected,
+            )
+
+        if not safe_candidates:
+            message = 'No safe calibration validation moves fit current room constraints'
+            logger.warning('%s: %s', message, rejected)
+            if calibration_artifact is not None:
+                calibration_artifact.fail(message, rejected=rejected)
+            return False
+
+        if not await self.tension_and_wait(calibration_artifact, phase='safe_motion_validation'):
+            if calibration_artifact is not None:
+                calibration_artifact.fail('safe motion validation failed to settle line tension')
+            return False
+
+        successful_probes = []
+        unhealthy_probes = []
+        for label, direction in safe_candidates:
+            self._record_calibration_line_health(
+                calibration_artifact,
+                kind='safe_motion_before_probe',
+                label=label,
+            )
+            await self.move_direction_speed(
+                direction,
+                speed=speed_mps,
+                starting_pos=start_pos,
+                downward_bias=0,
+                key='default',
+                record_retry=False,
+            )
+            await asyncio.sleep(settle_s)
+            self.slow_stop_all_spools()
+            await asyncio.sleep(settle_s)
+            health = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='safe_motion_after_probe',
+                label=label,
+            )
+            if health is not None and (not health.get('valid', False) or health.get('high_tension_lines')):
+                fatal_probe = bool(health.get('high_tension_lines'))
+                hazard = self._record_calibration_hazard(
+                    'safe_motion_validation',
+                    lines=health.get('high_tension_lines', []),
+                    message=f'safe validation probe {label} produced unhealthy line state',
+                    fatal=fatal_probe,
+                )
+                if calibration_artifact is not None:
+                    calibration_artifact.record_observation(
+                        kind='calibration_hazard',
+                        hazard=hazard,
+                    )
+                    if fatal_probe:
+                        calibration_artifact.fail(
+                            'safe motion validation produced high tension',
+                            label=label,
+                            line_health=health,
+                            hazard=hazard,
+                        )
+                        self.input_velocities['default'] = np.zeros(3)
+                        self.slow_stop_all_spools()
+                        return False
+                unhealthy_probes.append({
+                    'label': label,
+                    'line_health': health,
+                })
+                continue
+            await self.move_direction_speed(
+                -direction,
+                speed=speed_mps,
+                starting_pos=start_pos + direction * distance_m,
+                downward_bias=0,
+                key='default',
+                record_retry=False,
+            )
+            await asyncio.sleep(settle_s)
+            self.slow_stop_all_spools()
+            await asyncio.sleep(settle_s)
+            return_health = self._record_calibration_line_health(
+                calibration_artifact,
+                kind='safe_motion_after_return',
+                label=label,
+            )
+            if return_health is not None and (not return_health.get('valid', False) or return_health.get('high_tension_lines')):
+                fatal_return = bool(return_health.get('high_tension_lines'))
+                hazard = self._record_calibration_hazard(
+                    'safe_motion_validation_return',
+                    lines=return_health.get('high_tension_lines', []),
+                    message=f'safe validation return {label} produced unhealthy line state',
+                    fatal=fatal_return,
+                )
+                if calibration_artifact is not None:
+                    calibration_artifact.record_observation(
+                        kind='calibration_hazard',
+                        hazard=hazard,
+                    )
+                    if fatal_return:
+                        calibration_artifact.fail(
+                            'safe motion validation return produced high tension',
+                            label=label,
+                            line_health=return_health,
+                            hazard=hazard,
+                        )
+                        self.input_velocities['default'] = np.zeros(3)
+                        self.slow_stop_all_spools()
+                        return False
+                unhealthy_probes.append({
+                    'label': f'{label}_return',
+                    'line_health': return_health,
+                })
+                continue
+            successful_probes.append(label)
+            if len(successful_probes) >= 2:
+                break
+
+        self.input_velocities['default'] = np.zeros(3)
+        self.slow_stop_all_spools()
+        if not successful_probes:
+            if calibration_artifact is not None:
+                calibration_artifact.fail(
+                    'safe motion validation produced no healthy probe directions',
+                    unhealthy_probes=unhealthy_probes,
+                )
+            return False
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='safe_motion_validation_result',
+                successful_probes=successful_probes,
+                unhealthy_probes=unhealthy_probes,
+            )
+        return True
+
+    async def wait_for_safe_calibration_start_position(self, calibration_artifact=None):
+        """Ensure the current gantry XY is safe before calibration performs line/floor setup motions."""
+        safety_config = self._calibration_safety_config()
+        mode = self._calibration_mode(safety_config)
+        timeout_s = self._manual_assist_reference_timeout() if mode == 'manual_assisted' else 0.0
+        deadline = time.time() + timeout_s
+        last_reason = None
+
+        while True:
+            point = getattr(getattr(self, 'pe', None), 'gant_pos', None)
+            try:
+                point_xyz = np.asarray(point, dtype=float).reshape(-1)[:3]
+            except (TypeError, ValueError):
+                point_xyz = None
+            if point_xyz is not None and point_xyz.size >= 2 and np.all(np.isfinite(point_xyz[:2])):
+                ok, reason = self._calibration_point_safe(point_xyz, 'calibration_start', safety_config)
+                if ok:
+                    if calibration_artifact is not None:
+                        calibration_artifact.record_observation(
+                            kind='safe_calibration_start',
+                            point_xy=point_xyz[:2],
+                            point_xyz=point_xyz[:3],
+                            mode=mode,
+                        )
+                    return True
+                last_reason = reason
+            else:
+                last_reason = 'no finite gantry position'
+
+            if mode != 'manual_assisted' or time.time() >= deadline:
+                message = f'Calibration start position is not safe: {last_reason}'
+                logger.warning(message)
+                if calibration_artifact is not None:
+                    calibration_artifact.fail(message)
+                return False
+
+            message = (
+                f'Calibration start position is not safe: {last_reason}. '
+                'Move the gantry/target into the configured safe zone.'
+            )
+            logger.warning(message)
+            self.send_ui(operation_progress=telemetry.OperationProgress(
+                percent_complete=100.0,
+                name="Calibration",
+                current_action=message,
+            ))
+            self.send_ui(pop_message=telemetry.Popup(message=message))
+            await asyncio.sleep(1.0)
+
+    async def return_to_calibration_start_envelope(self, calibration_artifact=None, phase=None):
+        """Move downward into the configured calibration Z envelope when XY is already safe."""
+        safety_config = self._calibration_safety_config()
+        point = getattr(getattr(self, 'pe', None), 'gant_pos', None)
+        try:
+            point_xyz = np.asarray(point, dtype=float).reshape(-1)[:3]
+        except (TypeError, ValueError):
+            point_xyz = None
+        if point_xyz is None or point_xyz.size < 3 or not np.all(np.isfinite(point_xyz)):
+            return False
+
+        ok, reason = self._calibration_point_safe(point_xyz, 'calibration_start_return', safety_config)
+        if ok:
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='calibration_start_envelope_return',
+                    phase=phase,
+                    skipped=True,
+                    reason='already_safe',
+                    start_pos=point_xyz,
+                )
+            return True
+
+        z_bounds = self._calibration_z_bounds(safety_config)
+        if z_bounds is None:
+            return False
+        z_min, z_max = z_bounds
+        if z_max is None or point_xyz[2] <= z_max:
+            return False
+
+        xy_ok, xy_reason = self._calibration_probe_safe(point_xyz[:2], 'calibration_start_return_xy', safety_config)
+        if not xy_ok:
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='calibration_start_envelope_return',
+                    phase=phase,
+                    skipped=True,
+                    reason=xy_reason,
+                    start_pos=point_xyz,
+                )
+            return False
+
+        target_pos = point_xyz.copy()
+        target_z = z_max - CAL_ENVELOPE_RETURN_Z_MARGIN_M
+        if z_min is not None:
+            target_z = max(target_z, z_min)
+        if target_z >= point_xyz[2]:
+            return False
+        target_pos[2] = target_z
+        target_ok, target_reason = self._calibration_point_safe(
+            target_pos,
+            'calibration_start_return_target',
+            safety_config,
+        )
+        if not target_ok:
+            if calibration_artifact is not None:
+                calibration_artifact.record_observation(
+                    kind='calibration_start_envelope_return',
+                    phase=phase,
+                    skipped=True,
+                    reason=target_reason,
+                    start_pos=point_xyz,
+                    target_pos=target_pos,
+                )
+            return False
+
+        distance_m = float(point_xyz[2] - target_z)
+        duration_s = distance_m / max(CAL_ENVELOPE_RETURN_SPEED_MPS, 1e-6)
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='calibration_start_envelope_return',
+                phase=phase,
+                skipped=False,
+                reason=reason,
+                start_pos=point_xyz,
+                target_pos=target_pos,
+                speed_mps=CAL_ENVELOPE_RETURN_SPEED_MPS,
+                duration_s=duration_s,
+            )
+        self._record_calibration_line_health(
+            calibration_artifact,
+            kind='before_calibration_start_envelope_return',
+            calibration_phase=phase,
+        )
+        await self.move_direction_speed(
+            np.array([0.0, 0.0, -1.0]),
+            speed=CAL_ENVELOPE_RETURN_SPEED_MPS,
+            starting_pos=point_xyz,
+            downward_bias=0,
+            key='default',
+            record_retry=False,
+        )
+        await asyncio.sleep(duration_s)
+        self.input_velocities['default'] = np.zeros(3)
+        self.slow_stop_all_spools()
+        await asyncio.sleep(CAL_ENVELOPE_RETURN_SETTLE_S)
+        self._record_calibration_line_health(
+            calibration_artifact,
+            kind='after_calibration_start_envelope_return',
+            calibration_phase=phase,
+        )
+        if self._fail_on_calibration_hazard(calibration_artifact, phase=phase):
+            return False
+
+        final_point = getattr(getattr(self, 'pe', None), 'gant_pos', None)
+        try:
+            final_xyz = np.asarray(final_point, dtype=float).reshape(-1)[:3]
+        except (TypeError, ValueError):
+            final_xyz = None
+        final_ok = False
+        final_reason = 'no finite gantry position'
+        if final_xyz is not None and final_xyz.size >= 3 and np.all(np.isfinite(final_xyz)):
+            final_ok, final_reason = self._calibration_point_safe(
+                final_xyz,
+                'calibration_start_return_final',
+                safety_config,
+            )
+        if calibration_artifact is not None:
+            calibration_artifact.record_observation(
+                kind='calibration_start_envelope_return_result',
+                phase=phase,
+                ok=bool(final_ok),
+                reason=final_reason,
+                final_pos=final_xyz,
+            )
+        return bool(final_ok)
 
     async def full_auto_calibration(self):
         """Automatically determine anchor poses and zero angles
         This is a motion task"""
         calibration_artifact = self._new_calibration_artifact('full_auto_calibration')
+        saved_config = None
+        try:
+            saved_config = load_config(self.config_path)
+        except Exception:
+            logger.exception('Failed to snapshot config before full calibration')
         calibration_artifact.set_phase('start')
+        calibration_artifact.record_observation(
+            kind='calibration_safety_constraints',
+            safety=self._calibration_safety_report(),
+        )
         self.send_ui(operation_progress=telemetry.OperationProgress(
             percent_complete=0.0,
             name="Calibration",
@@ -2237,6 +5554,13 @@ class AsyncObserver:
         finger_task = None
         swing_calibration_ok = None
         DETECTION_WAIT_S = 1.0 # seconds
+        previous_calibration_active = getattr(self, '_calibration_active', False)
+        previous_line_tension_profiles = getattr(self, '_calibration_line_tension_profiles', None)
+        self._calibration_active = True
+        self._calibration_line_tension_profiles = None
+        self.calibration_hazards.clear()
+        self._last_reference_reset_degraded = False
+        self._calibration_degraded_reference_count = 0
         try:
             if len(self.anchors) < N_ANCHORS[self.config.anchor_type]:
                 calibration_artifact.fail(
@@ -2306,6 +5630,8 @@ class AsyncObserver:
             if self.config.anchor_type == common.AnchorType.ARPEGGIO:
                 calibration_artifact.set_phase('arpeggio_anchor_solve')
                 tilts = (self.config.anchors[0].indirect_line.cam_tilt, self.config.anchors[1].indirect_line.cam_tilt)
+                start_line_geometry = None
+                start_eyelet_guesses = None
                 # determine position of two anchors visually and guess at external eyelets.
                 async_result = self.pool.apply_async(optimize_arp_anchors, (raw_obs, None, None, None, None, tilts))
                 anchor_poses, eyelet_positions = async_result.get(timeout=30)
@@ -2315,14 +5641,67 @@ class AsyncObserver:
                 )
                 logger.info(f'Obtained result from optimize_arp_anchors anchor_poses=\n{anchor_poses}\neyelet_positions=\n{eyelet_positions}')
 
-                self.save_poses_arp(anchor_poses, eyelet_positions)
+                if anchor_poses is None or eyelet_positions is None:
+                    calibration_artifact.fail('arpeggio initial anchor solve failed')
+                    self._write_calibration_artifact(calibration_artifact)
+                    return False
+
+                start_line_geometry = self._calibration_start_line_geometry(raw_obs, anchor_poses, eyelet_positions, tilts)
+                if start_line_geometry is not None:
+                    calibration_artifact.record_observation(
+                        kind='calibration_start_line_geometry',
+                        **start_line_geometry,
+                    )
+                    start_eyelet_guesses = self._eyelet_guesses_from_start_line_geometry(
+                        start_line_geometry,
+                        eyelet_positions,
+                    )
+                    async_result = self.pool.apply_async(
+                        optimize_arp_anchors,
+                        (raw_obs, None, start_eyelet_guesses, None, None, tilts, start_line_geometry),
+                    )
+                    refined_anchor_poses, refined_eyelet_positions = async_result.get(timeout=30)
+                    calibration_artifact.record_optimizer_report(
+                        name='arpeggio_anchor_start_line_geometry',
+                        success=refined_anchor_poses is not None and refined_eyelet_positions is not None,
+                    )
+                    if refined_anchor_poses is None or refined_eyelet_positions is None:
+                        calibration_artifact.fail('arpeggio start line geometry solve failed')
+                        self._write_calibration_artifact(calibration_artifact)
+                        return False
+                    anchor_poses, eyelet_positions = refined_anchor_poses, refined_eyelet_positions
+                    start_line_geometry = self._calibration_start_line_geometry(raw_obs, anchor_poses, eyelet_positions, tilts)
+                    if start_line_geometry is not None:
+                        calibration_artifact.record_observation(
+                            kind='calibration_start_line_geometry_refined',
+                            **start_line_geometry,
+                        )
+                    logger.info(
+                        'Obtained line-geometry-refined anchor solve anchor_poses=\n%s\neyelet_positions=\n%s',
+                        anchor_poses,
+                        eyelet_positions,
+                    )
+
+                self.save_poses_arp(anchor_poses, eyelet_positions, persist=False)
+                await self.return_to_calibration_start_envelope(
+                    calibration_artifact,
+                    phase='arpeggio_anchor_solve',
+                )
+                if not await self.wait_for_safe_calibration_start_position(calibration_artifact):
+                    self._restore_calibration_config_state(saved_config)
+                    self._write_calibration_artifact(calibration_artifact)
+                    return False
                 self.send_ui(operation_progress=telemetry.OperationProgress(
                     percent_complete=15.0,
                     name="Calibration",
                     current_action="Collecting proprioceptive data",
                 ))
-                if await self.half_auto_calibration() is False:
+                if await self.half_auto_calibration(
+                    calibration_artifact,
+                    phase='pre_eyelet_reference',
+                ) is False:
                     calibration_artifact.fail('half calibration failed before eyelet solve')
+                    self._restore_calibration_config_state(saved_config)
                     self._write_calibration_artifact(calibration_artifact)
                     return False
 
@@ -2336,7 +5715,10 @@ class AsyncObserver:
 
                 # collect length_change_data data to estimate eyelets better
                 calibration_artifact.set_phase('arpeggio_eyelet_probe')
-                diamond_data, line_deltas = await self.collect_arp_anchor_eyelet_experiment_data(anchor_poses)
+                diamond_data, line_deltas = await self.collect_arp_anchor_eyelet_experiment_data(
+                    anchor_poses,
+                    calibration_artifact,
+                )
                 calibration_artifact.record_observation(
                     kind='arpeggio_diamond',
                     line_deltas=line_deltas,
@@ -2349,7 +5731,9 @@ class AsyncObserver:
                 for a in self.anchors.values():
                     a.save_raw = False
                 # debug: save args for experimentation
-                args = (raw_obs, diamond_data, None, None, line_deltas, tilts)
+                if start_eyelet_guesses is None:
+                    start_eyelet_guesses = eyelet_positions
+                args = (raw_obs, diamond_data, start_eyelet_guesses, None, line_deltas, tilts, start_line_geometry)
                 # with open('arp_opt_data.pkl', 'wb') as f:
                 #     pickle.dump(args, f)
                 # optimize again with length_change_data
@@ -2362,7 +5746,7 @@ class AsyncObserver:
                 )
                 logger.info(f'Obtained result from optimize_arp_anchors anchor_poses=\n{anchor_poses}\neyelet_positions=\n{eyelet_positions}')
 
-                self.save_poses_arp(anchor_poses, eyelet_positions)
+                self.save_poses_arp(anchor_poses, eyelet_positions, persist=False)
 
             else:
                 calibration_artifact.set_phase('pilot_anchor_solve')
@@ -2383,7 +5767,6 @@ class AsyncObserver:
                 for client in self.anchors.values():
                     self.config.anchors[client.anchor_num].pose = poseTupleToProto(anchor_poses[client.anchor_num])
                     client.updatePose(anchor_poses[client.anchor_num])
-                save_config(self.config, self.config_path)
                 # inform UI
                 self.send_ui(new_anchor_poses=telemetry.AnchorPoses(poses=[
                     poseTupleToProto(p)
@@ -2399,9 +5782,29 @@ class AsyncObserver:
                 name="Calibration",
                 current_action="Tensioning lines and Locating Gripper",
             ))
-            if await self.half_auto_calibration() is False:
+            if await self.half_auto_calibration(
+                calibration_artifact,
+                phase='post_anchor_reference',
+            ) is False:
                 calibration_artifact.fail('half calibration failed after anchor solve')
+                self._restore_calibration_config_state(saved_config)
                 self._write_calibration_artifact(calibration_artifact)
+                return False
+
+            calibration_artifact.set_phase('safe_motion_validation')
+            self.send_ui(operation_progress=telemetry.OperationProgress(
+                percent_complete=50.0,
+                name="Calibration",
+                current_action="Validating safe motion envelope",
+            ))
+            if await self.validate_calibration_safe_motion(calibration_artifact) is False:
+                self._restore_calibration_config_state(saved_config)
+                self._write_calibration_artifact(calibration_artifact)
+                self.send_ui(operation_progress=telemetry.OperationProgress(
+                    percent_complete=100.0,
+                    name="Calibration",
+                    current_action="Calibration failed: safe motion validation did not pass",
+                ))
                 return False
 
             # open grip enough that we can see an unobstructed view from the palm camera
@@ -2424,14 +5827,33 @@ class AsyncObserver:
                 current_action="Measuring spin",
             ))
             # there should be some swing when we get there. 
-            if await self.half_auto_calibration() is False:
+            if await self.half_auto_calibration(
+                calibration_artifact,
+                phase='pre_spin_reference',
+            ) is False:
                 calibration_artifact.fail('half calibration failed before spin calibration')
+                self._restore_calibration_config_state(saved_config)
                 self._write_calibration_artifact(calibration_artifact)
+                return False
+
+            calibration_artifact.set_phase('spin_origin_staging')
+            if not await self.stage_origin_for_spin_calibration(calibration_artifact):
+                calibration_artifact.fail('origin card could not be staged into the gripper camera view')
+                self._restore_calibration_config_state(saved_config)
+                self._write_calibration_artifact(calibration_artifact)
+                self.send_ui(operation_progress=telemetry.OperationProgress(
+                    percent_complete=100.0,
+                    name="Calibration",
+                    current_action="Calibration failed: origin card not visible to gripper camera",
+                ))
                 return False
 
             # roomspin
             calibration_artifact.set_phase('spin_calibration')
-            await self.calibrate_spin(reset_wrist_first=True) # already did that during diamond to save time
+            await self.calibrate_spin(
+                reset_wrist_first=True,
+                calibration_artifact=calibration_artifact,
+            ) # already did that during diamond to save time
 
             if isinstance(self.gripper_client, ArpeggioGripperClient) and self.gripper_client.connected:
                 self.send_ui(operation_progress=telemetry.OperationProgress(
@@ -2453,6 +5875,34 @@ class AsyncObserver:
                     "Calibration completed, but swing cancellation calibration failed. "
                     "Leave swing cancellation disabled and rerun swingcal after checking logs."
                 )
+            health_report = self._calibration_health_report(calibration_artifact)
+            calibration_artifact.record_optimizer_report(
+                name='calibration_health_gate',
+                success=health_report['ok'],
+                health=health_report,
+            )
+            if not health_report['ok']:
+                message = (
+                    'Calibration did not pass the health gate. '
+                    f'Score={health_report["score"]}/{health_report["min_score"]}; '
+                    f'reasons={health_report["reasons"]}'
+                )
+                logger.warning(message)
+                calibration_artifact.fail('calibration health gate failed', health=health_report)
+                self._restore_calibration_config_state(saved_config)
+                self._write_calibration_artifact(calibration_artifact)
+                self.send_ui(operation_progress=telemetry.OperationProgress(
+                    percent_complete=100.0,
+                    name="Calibration",
+                    current_action=message,
+                ))
+                return False
+            self._save_config_preserving_calibration_safety()
+            calibration_artifact.record_observation(
+                kind='config_persisted',
+                config_path=self.config_path,
+                health=health_report,
+            )
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=100.0,
                 name="Calibration",
@@ -2467,6 +5917,7 @@ class AsyncObserver:
 
         except asyncio.CancelledError:
             calibration_artifact.fail('cancelled by user')
+            self._restore_calibration_config_state(saved_config)
             self._write_calibration_artifact(calibration_artifact)
             if finger_task is not None:
                 finger_task.cancel()
@@ -2479,15 +5930,23 @@ class AsyncObserver:
             raise
         except Exception as e:
             calibration_artifact.fail('calibration failed', exception=repr(e))
+            self._restore_calibration_config_state(saved_config)
             self._write_calibration_artifact(calibration_artifact)
+            failure_summary = self._calibration_failure_summary(
+                calibration_artifact,
+                default=f'Calibration failed: {e}',
+            )
             self.send_ui(operation_progress=telemetry.OperationProgress(
                 percent_complete=100.0,
                 name="Calibration",
-                current_action='Calibration failed, see motion controller console',
+                current_action=failure_summary,
             ))
             raise
+        finally:
+            self._calibration_active = previous_calibration_active
+            self._calibration_line_tension_profiles = previous_line_tension_profiles
 
-    async def calibrate_spin(self, reset_wrist_first=True):
+    async def calibrate_spin(self, reset_wrist_first=True, calibration_artifact=None):
         """Calibration of the relationship between the wrist and the room frame of reference.
         Must be done over the origin card.
         """
@@ -2514,30 +5973,17 @@ class AsyncObserver:
                     actual_wrist = self.datastore.winch_line_record.getLast()[1]
                 logger.info(f'Actual wrist position = {actual_wrist}')
 
-            # detect origin card
-            try:
-                await asyncio.sleep(0.1)
-                origin_card_pose = [None]
-                def special_handle_det(timestamp, detections):
-                    for d in detections:
-                        if d['n'] == 'origin':
-                            # a pose of the origin card in the frame of reference of the stabilized gripper cam.
-                            origin_card_pose[0] = d['p']
-                end_time = time.time() + 10
-                logger.info('Collecting observations of origin card from gripper cam')
-                while origin_card_pose[0] is None and time.time() < end_time:
-                    async_result = self.pool.apply_async(
-                        locate_markers_gripper,
-                        (self.gripper_client.last_frame_resized, self.config.camera_cal_wide),
-                        callback=partial(special_handle_det, time.time()))
-                    detections = async_result.get(timeout=5)
-            except Exception as e:
-                logger.exception(e)
-                raise
-            if origin_card_pose[0] is None:
+            logger.info('Collecting observations of origin card from gripper cam')
+            origin_card_detection = await self._wait_for_gripper_marker('origin', timeout_s=10)
+            if origin_card_detection is None:
+                logger.info('Origin not visible to gripper camera; starting anchor-assisted staging')
+                await self.stage_origin_for_spin_calibration(calibration_artifact)
+                origin_card_detection = await self._wait_for_gripper_marker('origin', timeout_s=10)
+            if origin_card_detection is None:
                 raise RuntimeError("Gripper camera was unable to make any observations of the origin card.")
 
-            euler_rot = Rotation.from_rotvec(origin_card_pose[0][0]).as_euler('zyx')
+            origin_card_pose = origin_card_detection['p']
+            euler_rot = Rotation.from_rotvec(origin_card_pose[0]).as_euler('zyx')
             logger.info(f'Euler rotation of origin card relative to stabilized gripper camera {euler_rot}')
             roomspin = euler_rot[0]
             self.config.gripper.frame_room_spin = roomspin
@@ -3445,9 +6891,14 @@ class AsyncObserver:
             speed = 0
             total_velocity = np.zeros(3)
 
-        if record_retry:
-            self._record_retryable_move(key, total_velocity)
-            
+        if speed > 0 and getattr(self, '_calibration_active', False):
+            ok, reason = self._calibration_point_safe(new_pos, 'calibration_motion')
+            if not ok:
+                logger.warning('Blocking calibration motion outside safe envelope: %s', reason)
+                speed = 0
+                total_velocity = np.zeros(3)
+                self.input_velocities[key] = np.zeros(3)
+
         lengths_b = np.linalg.norm(new_pos - self.pe.anchor_points, axis=1)
         deltas = lengths_b - lengths_a
         line_speeds = deltas * KINEMATICS_STEP_SCALE

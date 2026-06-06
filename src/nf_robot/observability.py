@@ -199,6 +199,7 @@ class Observability:
         self._target_status_labels: set[tuple[str, str]] = set()
         self._expected_components: dict[tuple[str, str], float] = {}
         self._component_seen_at: dict[tuple[str, str], float] = {}
+        self._line_motor_debug_at: dict[str, float] = {}
         self.debug_enabled = False
 
     def configure(
@@ -298,6 +299,74 @@ class Observability:
         self._gauges["event_loop_lag"] = Gauge("nf_robot_event_loop_lag_seconds", "Last event loop lag sample")
         self._gauges["line_tension"] = Gauge(
             "nf_robot_line_tension_newtons", "Passive safety EMA line tension in newtons", ["line"]
+        )
+        self._gauges["line_length"] = Gauge(
+            "nf_robot_line_length_meters", "Latest measured line length by line", ["line"]
+        )
+        self._gauges["line_speed"] = Gauge(
+            "nf_robot_line_speed_meters_per_second", "Latest measured line speed by line", ["line"]
+        )
+        self._gauges["line_motor_torque"] = Gauge(
+            "nf_robot_line_motor_torque_newton_meters",
+            "Latest per-line motor torque in newton-meters by source",
+            ["line", "source"],
+        )
+        self._gauges["line_motor_position"] = Gauge(
+            "nf_robot_line_motor_position_radians", "Latest per-line motor position in radians", ["line"]
+        )
+        self._gauges["line_motor_velocity"] = Gauge(
+            "nf_robot_line_motor_velocity_radians_per_second",
+            "Latest per-line motor velocity in radians per second",
+            ["line"],
+        )
+        self._gauges["line_motor_commanded_velocity"] = Gauge(
+            "nf_robot_line_motor_commanded_velocity_radians_per_second",
+            "Latest per-line motor commanded velocity in radians per second",
+            ["line"],
+        )
+        self._gauges["line_motor_torque_error"] = Gauge(
+            "nf_robot_line_motor_torque_error_newton_meters",
+            "Latest per-line motor torque error used by anti-tangle control",
+            ["line"],
+        )
+        self._gauges["line_motor_mute_factor"] = Gauge(
+            "nf_robot_line_motor_mute_factor",
+            "Latest anti-tangle motor command mute factor, from 0 muted to 1 unmuted",
+            ["line"],
+        )
+        self._gauges["line_motor_anti_tangle_enabled"] = Gauge(
+            "nf_robot_line_motor_anti_tangle_enabled",
+            "Whether anti-tangle control is enabled for the line motor",
+            ["line"],
+        )
+        self._gauges["line_spool_unspool_rate"] = Gauge(
+            "nf_robot_line_spool_unspool_rate_meters_per_revolution",
+            "Latest line payout rate of the spool in meters per motor revolution",
+            ["line"],
+        )
+        self._gauges["line_motor_controller_available"] = Gauge(
+            "nf_robot_line_motor_controller_available",
+            "Whether rich motor controller telemetry has been observed for the line",
+            ["line"],
+        )
+        self._gauges["line_motor_status_code"] = Gauge(
+            "nf_robot_line_motor_status_code", "Latest reported line motor controller status code", ["line"]
+        )
+        self._gauges["line_motor_temperature"] = Gauge(
+            "nf_robot_line_motor_temperature_celsius",
+            "Latest line motor controller temperature by sensor",
+            ["line", "sensor"],
+        )
+        self._gauges["line_motor_voltage"] = Gauge(
+            "nf_robot_line_motor_voltage_volts", "Latest line motor controller voltage", ["line"]
+        )
+        self._gauges["line_motor_current"] = Gauge(
+            "nf_robot_line_motor_current_amperes", "Latest line motor controller current", ["line"]
+        )
+        self._gauges["line_motor_sample_last_seen"] = Gauge(
+            "nf_robot_line_motor_sample_last_seen_timestamp_seconds",
+            "Unix timestamp of the latest rich motor controller telemetry sample by line",
+            ["line"],
         )
         self._gauges["max_safe_tension"] = Gauge(
             "nf_robot_max_safe_tension_newtons", "Passive safety configured max safe line tension"
@@ -632,6 +701,33 @@ class Observability:
             tension = self._gauges.get("line_tension")
             if tension is not None:
                 tension.labels(str(line)).set(0)
+            for gauge_name in (
+                "line_length",
+                "line_speed",
+                "line_motor_position",
+                "line_motor_velocity",
+                "line_motor_commanded_velocity",
+                "line_motor_torque_error",
+                "line_motor_mute_factor",
+                "line_motor_anti_tangle_enabled",
+                "line_spool_unspool_rate",
+                "line_motor_controller_available",
+                "line_motor_status_code",
+                "line_motor_voltage",
+                "line_motor_current",
+                "line_motor_sample_last_seen",
+            ):
+                gauge = self._gauges.get(gauge_name)
+                if gauge is not None:
+                    gauge.labels(str(line)).set(0)
+            torque = self._gauges.get("line_motor_torque")
+            if torque is not None:
+                for source in ("raw_motor", "smoothed_motor", "derived_from_tension"):
+                    torque.labels(str(line), source).set(0)
+            temperature = self._gauges.get("line_motor_temperature")
+            if temperature is not None:
+                for sensor in ("mosfet", "rotor"):
+                    temperature.labels(str(line), sensor).set(0)
             origin = self._gauges.get("calibration_anchor_sees_origin")
             if origin is not None:
                 origin.labels(str(line)).set(0)
@@ -1258,6 +1354,103 @@ class Observability:
             for index, value in enumerate(values):
                 line_gauge.labels(str(index)).set(float(value))
         self._debug_state("tension_sample", values=values, max_safe_tension=max_safe_tension)
+
+    def record_line_motor_sample(
+        self,
+        line: int | str,
+        *,
+        timestamp_s: float | None = None,
+        length_m: float | None = None,
+        line_speed_m_s: float | None = None,
+        tension_n: float | None = None,
+        metadata: Any = None,
+    ) -> None:
+        line_label = _label(line)
+        sample = metadata if isinstance(metadata, dict) else {}
+
+        def sample_float(*keys: str) -> float | None:
+            for key in keys:
+                if key in sample:
+                    return _safe_float(sample.get(key))
+            return None
+
+        timestamp = _safe_float(timestamp_s, time.time())
+        for gauge_name, value in (
+            ("line_length", length_m),
+            ("line_speed", line_speed_m_s),
+            ("line_tension", tension_n),
+        ):
+            gauge = self._gauges.get(gauge_name)
+            if gauge is not None and value is not None:
+                gauge.labels(line_label).set(_safe_float(value))
+
+        controller_available = bool(sample.get("motor_controller_available")) or any(
+            key in sample
+            for key in (
+                "motor_torque_nm",
+                "torque_nm",
+                "motor_position_rad",
+                "motor_velocity_rad_s",
+                "motor_status_code",
+            )
+        )
+        available = self._gauges.get("line_motor_controller_available")
+        if available is not None:
+            available.labels(line_label).set(1 if controller_available else 0)
+        last_seen = self._gauges.get("line_motor_sample_last_seen")
+        if last_seen is not None:
+            last_seen.labels(line_label).set(timestamp)
+
+        torque = self._gauges.get("line_motor_torque")
+        if torque is not None:
+            raw_torque = sample_float("motor_torque_nm", "torque_nm")
+            if raw_torque is not None:
+                torque.labels(line_label, "raw_motor").set(raw_torque)
+            smoothed_torque = sample_float("smoothed_motor_torque_nm", "filtered_motor_torque_nm")
+            if smoothed_torque is not None:
+                torque.labels(line_label, "smoothed_motor").set(smoothed_torque)
+            spool_rate = sample_float("spool_unspool_rate_m_per_rev", "meters_per_rev")
+            if tension_n is not None and spool_rate not in (None, 0.0):
+                derived_torque = -_safe_float(tension_n) * spool_rate / (2 * math.pi)
+                torque.labels(line_label, "derived_from_tension").set(derived_torque)
+
+        for gauge_name, value in (
+            ("line_motor_position", sample_float("motor_position_rad", "position_rad")),
+            ("line_motor_velocity", sample_float("motor_velocity_rad_s", "velocity_rad_s")),
+            ("line_motor_commanded_velocity", sample_float("motor_commanded_velocity_rad_s", "commanded_velocity_rad_s")),
+            ("line_motor_torque_error", sample_float("torque_error_nm")),
+            ("line_motor_mute_factor", sample_float("mute_factor")),
+            ("line_motor_anti_tangle_enabled", 1.0 if sample.get("anti_tangle_enabled") else 0.0 if sample else None),
+            ("line_spool_unspool_rate", sample_float("spool_unspool_rate_m_per_rev", "meters_per_rev")),
+            ("line_motor_status_code", sample_float("motor_status_code", "status_code")),
+            ("line_motor_voltage", sample_float("motor_voltage_v", "voltage_v", "voltage")),
+            ("line_motor_current", sample_float("motor_current_a", "current_a", "current")),
+        ):
+            gauge = self._gauges.get(gauge_name)
+            if gauge is not None and value is not None:
+                gauge.labels(line_label).set(value)
+
+        temperature = self._gauges.get("line_motor_temperature")
+        if temperature is not None:
+            for sensor, value in (
+                ("mosfet", sample_float("motor_mos_temperature_c", "mos_temperature_c", "t_mos")),
+                ("rotor", sample_float("motor_rotor_temperature_c", "rotor_temperature_c", "t_rotor")),
+            ):
+                if value is not None:
+                    temperature.labels(line_label, sensor).set(value)
+
+        now = time.time()
+        if now - self._line_motor_debug_at.get(line_label, 0.0) >= 2.0:
+            self._line_motor_debug_at[line_label] = now
+            self._debug_state(
+                "line_motor_sample",
+                line=line_label,
+                timestamp=timestamp,
+                length_m=length_m,
+                line_speed_m_s=line_speed_m_s,
+                tension_n=tension_n,
+                metadata=sample,
+            )
 
     def record_safety_stop(self) -> None:
         counter = self._counters.get("safety_stops")

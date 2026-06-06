@@ -311,6 +311,20 @@ class TestAnchorArpServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.server.line_action_states[0]['status'], 'failed')
         self.assertEqual(self.server.line_action_states[0]['reason'], 'tension_timeout')
 
+    async def test_tighten_accepts_per_command_target_tension(self):
+        """Calibration can request a higher bounded tension target per tighten command."""
+        spool = self.mock_spools[0]
+        spool.last_tension = 20.0
+        spool.last_length = 3.0
+        self.server.conf['TIGHTEN_MONITOR_DURATION_S'] = 0.0
+
+        result = await self.server.tighten(0, target_tension_n=200.0)
+
+        self.assertTrue(result)
+        self.assertEqual(self.server.line_action_states[0]['status'], 'succeeded')
+        self.assertEqual(self.server.line_action_states[0]['target_tension_n'], 20.0)
+        self.assertEqual(spool.setAimSpeed.call_args[0][0], 0)
+
     async def test_tighten_stale_line_state_stops_and_reports_failure(self):
         """No length or tension movement while commanded is reported as stale/stuck."""
         spool = self.mock_spools[1]

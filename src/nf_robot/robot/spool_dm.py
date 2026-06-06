@@ -28,6 +28,17 @@ default_conf_dm = {
     'POS_DEADBAND': 0.015
 }
 
+def _state_float(states, *keys, default=None):
+    for key in keys:
+        value = states.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
 class DamiaoSpoolController:
     """
     Spool controller intended for Damiao H-6215 motor
@@ -68,6 +79,14 @@ class DamiaoSpoolController:
         self.last_tension  = 0.0
         self.meters_per_rev = self.sc.get_unspool_rate(self.last_angle)
         self.torque_err = 0
+        self.last_line_speed_m_s = 0.0
+        self.last_motor_position_rad = 0.0
+        self.last_motor_velocity_rad_s = 0.0
+        self.last_motor_torque_nm = 0.0
+        self.last_smoothed_motor_torque_nm = 0.0
+        self.last_motor_commanded_velocity_rad_s = 0.0
+        self.last_motor_mute_factor = 1.0
+        self.last_motor_state = {}
         
         # Absolute position tracking state
         self.last_raw_pos = None
@@ -201,11 +220,14 @@ class DamiaoSpoolController:
                 last_time = loop_start
                 
                 # Read feedback from motor. flip if necessary.
-                states = self.motor.get_states()
-                motor_pos = self.direction * states.get('pos', 0.0) # radians from -12 to +12
-                motor_vel = self.direction * states.get('vel', 0.0) # radians per second
-                motor_torque = self.direction * states.get('torq', 0.0) # Newton-meters
+                states = self.motor.get_states() or {}
+                motor_pos = self.direction * _state_float(states, 'pos', default=0.0) # radians from -12 to +12
+                motor_vel = self.direction * _state_float(states, 'vel', default=0.0) # radians per second
+                motor_torque = self.direction * _state_float(states, 'torq', default=0.0) # Newton-meters
                 # we could also read status status_code, t_mos, t_rotor (temps)
+                self.last_motor_position_rad = float(motor_pos)
+                self.last_motor_velocity_rad_s = float(motor_vel)
+                self.last_motor_torque_nm = float(motor_torque)
 
                 # Convert to absolute position in revolutions
                 self.last_angle = self._update_absolute_angle(motor_pos)
@@ -213,11 +235,13 @@ class DamiaoSpoolController:
                 # low pass filter torque
                 sf = self.conf['SMOOTH_FACTOR']
                 smooth_torque = motor_torque * sf + smooth_torque * (1 - sf)
+                self.last_smoothed_motor_torque_nm = float(smooth_torque)
 
                 # calculate line data from motor data
                 self.last_length = self.sc.get_unspooled_length(self.last_angle)
                 self.meters_per_rev = self.sc.get_unspool_rate(self.last_angle)
                 current_line_speed = (motor_vel / twopi) * self.meters_per_rev
+                self.last_line_speed_m_s = float(current_line_speed)
                 self.last_tension = (-smooth_torque * twopi) / self.meters_per_rev
 
                 # Position control logic (using during jog)
@@ -233,21 +257,47 @@ class DamiaoSpoolController:
                         self.aim_line_speed = 0
                         logging.info(f'cur_len {self.last_length}')
 
-                # accumulate these. parent class will send them on the websocket at it's own rate
-                row = (loop_start, self.last_length, current_line_speed, self.last_tension)
-                self.record.append(row)
-
                 # convert last commanded speed from motion controller in meters per second
                 # to motor velocity in radians per second based on current circumfrence
                 # let motor enforce acceleration limit
                 wanted_motor_vel = self.aim_line_speed / self.meters_per_rev * twopi
 
                 # prevent birdsnest by soft muting velocity when outspooling with no tension
+                self.torque_err = smooth_torque - self.conf['TARGET_TORQUE']
                 if self.anti_tangle_enabled:
-                    self.torque_err = smooth_torque - self.conf['TARGET_TORQUE']
                     mute = 0 if (self.torque_err > 0 and wanted_motor_vel > 0) else 1
                     smooth_mute = mute * sf + smooth_mute * (1 - sf)
                     wanted_motor_vel *= smooth_mute
+
+                self.last_motor_commanded_velocity_rad_s = float(wanted_motor_vel)
+                self.last_motor_mute_factor = float(smooth_mute)
+                motor_state = {
+                    'motor_controller_available': True,
+                    'motor_torque_nm': float(motor_torque),
+                    'smoothed_motor_torque_nm': float(smooth_torque),
+                    'motor_position_rad': float(motor_pos),
+                    'motor_velocity_rad_s': float(motor_vel),
+                    'motor_commanded_velocity_rad_s': float(wanted_motor_vel),
+                    'torque_error_nm': float(self.torque_err),
+                    'mute_factor': float(smooth_mute),
+                    'anti_tangle_enabled': bool(self.anti_tangle_enabled),
+                    'spool_unspool_rate_m_per_rev': float(self.meters_per_rev),
+                }
+                for out_key, state_keys in (
+                    ('motor_status_code', ('status_code', 'status')),
+                    ('motor_mos_temperature_c', ('t_mos', 'mos_temperature', 'mos_temp')),
+                    ('motor_rotor_temperature_c', ('t_rotor', 'rotor_temperature', 'rotor_temp')),
+                    ('motor_voltage_v', ('voltage', 'volt', 'v_bus', 'bus_voltage')),
+                    ('motor_current_a', ('current', 'curr', 'i_bus', 'bus_current')),
+                ):
+                    value = _state_float(states, *state_keys)
+                    if value is not None:
+                        motor_state[out_key] = value
+                self.last_motor_state = motor_state
+
+                # Keep the first four fields backward compatible: time, length, line speed, tension.
+                row = (loop_start, self.last_length, current_line_speed, self.last_tension, motor_state)
+                self.record.append(row)
                 
                 self.motor.send_cmd_vel(target_velocity=wanted_motor_vel*self.direction)
 

@@ -1,0 +1,56 @@
+{
+  "calibrationSafety": {
+    "mode": "manual_assisted",
+    "safeProbeCenter": [0.0, 0.0],
+    "lineEndpoints": [
+      [4.5, -1.5],
+      [-4.5, 2.25],
+      [0.0, -4.6],
+      [-0.5, 5.1]
+    ],
+    "calibrationZone": [
+      [-1.2, -1.0],
+      [1.2, -1.0],
+      [1.2, 1.0],
+      [-1.2, 1.0]
+    ],
+    "noGoZones": [
+      {
+        "name": "standing_lamp",
+        "center": [0.75, -0.35],
+        "radiusM": 0.22,
+        "marginM": 0.12
+      },
+      {
+        "name": "chair_back",
+        "polygon": [
+          [-0.8, 0.4],
+          [-0.2, 0.4],
+          [-0.2, 0.9],
+          [-0.8, 0.9]
+        ],
+        "marginM": 0.1
+      },
+      {
+        "name": "table_edge",
+        "rect": [
+          [0.25, 0.55],
+          [1.15, 0.75]
+        ],
+        "marginM": 0.08
+      }
+    ],
+    "maxProbeHalfWidthM": 0.65,
+    "maxProbeHalfHeightM": 0.08,
+    "minProbeHalfWidthM": 0.08,
+    "minProbeHalfHeightM": 0.02,
+    "obstacleMarginM": 0.08,
+    "hazardAvoidRadiusM": 0.35,
+    "validationDistanceM": 0.04,
+    "validationSpeedMps": 0.03,
+    "validationSettleS": 0.35,
+    "manualAssistTimeoutS": 20,
+    "allowDegradedReference": false,
+    "skipSafeMotionValidation": false
+  }
+}

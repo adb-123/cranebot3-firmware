@@ -16,6 +16,7 @@ W_DIAMOND_PLANAR = 0.2 # weight for forcing the gantry and eyelets into a single
 W_EYELET_REG = 0.2 # weight to keep eyelets near their initial 5m guess
 W_SHAPE_MATCH = 1.0 # weight to force distance between anchors to match distance between eyelets
 W_ANCHOR_TILT = 10.0 # weight to penalize anchor pitch/roll changes (locks rotation to Z-axis only)
+W_START_LINE_LENGTH = 0.7 # weight live start line lengths against solved pull points
 ROBUST_LOSS = 'soft_l1'
 ROBUST_F_SCALE = 0.1
 
@@ -81,7 +82,7 @@ def _log_solver_result(name, result):
 # left   -> bottom: Eyelet 1 (Line 3) lengthens by 15cm (back to 'bottom' length)
 # =============================================================================
 
-def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None, debug=False, fixed_anchor_poses=None, line_deltas=None, cam_tilts=(22, 22)):
+def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None, debug=False, fixed_anchor_poses=None, line_deltas=None, cam_tilts=(22, 22), line_geometry=None):
     """
     Computes the vector of residuals (differences) for least_squares.
     
@@ -108,6 +109,7 @@ def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None,
     cost_eyelet_reg = 0.0
     cost_shape_match = 0.0
     cost_anchor_tilt = 0.0
+    cost_start_line_length = 0.0
 
     # Pre-calculate the extra tilt nodes for the cameras
     tilt_nodes = []
@@ -287,6 +289,41 @@ def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None,
             cost_diamond_dist += sum(r**2 for r in d_res)
 
     # ---------------------------------------------------------
+    # Live start line geometry constraint
+    # ---------------------------------------------------------
+    if line_geometry is not None:
+        try:
+            gantry_pos = np.asarray(line_geometry.get('gantry_pos'), dtype=float)
+            line_lengths = np.asarray(line_geometry.get('line_lengths'), dtype=float)
+            usable_lines = np.asarray(line_geometry.get('usable_lines'), dtype=bool)
+        except (AttributeError, TypeError, ValueError):
+            gantry_pos = np.array([])
+            line_lengths = np.array([])
+            usable_lines = np.array([])
+
+        if gantry_pos.shape == (3,) and line_lengths.shape[0] >= 4 and usable_lines.shape[0] >= 4:
+            pull_points = np.array([
+                compose_poses([anchor_poses[0], model_constants.arp_anchor_right_eyelet])[1],
+                eyelet_positions[0],
+                compose_poses([anchor_poses[1], model_constants.arp_anchor_right_eyelet])[1],
+                eyelet_positions[1],
+            ], dtype=float)
+            start_line_residuals = []
+            for line_idx in range(4):
+                if not usable_lines[line_idx]:
+                    continue
+                measured = line_lengths[line_idx]
+                if not np.isfinite(measured) or measured <= 0:
+                    continue
+                predicted = np.linalg.norm(pull_points[line_idx] - gantry_pos)
+                if not np.isfinite(predicted):
+                    continue
+                start_line_residuals.append((predicted - measured) * W_START_LINE_LENGTH)
+            start_line_residuals = _normalized_residual_group(start_line_residuals)
+            residuals.extend(start_line_residuals)
+            cost_start_line_length += np.sum(start_line_residuals**2)
+
+    # ---------------------------------------------------------
     # Regularization (Anchor eyelets to initial guesses)
     # ---------------------------------------------------------
     if initial_eyelets is not None:
@@ -326,6 +363,7 @@ def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None,
         lines += [
             f"Diamond Planarity:  {cost_diamond_planar:.6f}",
             f"Diamond Distances:  {cost_diamond_dist:.6f}",
+            f"Start Line Lengths: {cost_start_line_length:.6f}",
             f"Shape Match (A~E):  {cost_shape_match:.6f}",
             f"Eyelet Reg (drift): {cost_eyelet_reg:.6f}",
             "----------------------",
@@ -334,7 +372,7 @@ def multi_card_residuals(x, raw_obs, diamond_observations, initial_eyelets=None,
 
     return np.array(residuals)
 
-def optimize_arp_anchors(raw_obs, diamond_observations=None, initial_eyelet_guesses=None, fixed_anchor_poses=None, line_deltas=None, cam_tilts=(22, 22)):
+def optimize_arp_anchors(raw_obs, diamond_observations=None, initial_eyelet_guesses=None, fixed_anchor_poses=None, line_deltas=None, cam_tilts=(22, 22), line_geometry=None):
     """
     Finds optimal anchor poses AND external eyelet positions.
     
@@ -391,12 +429,12 @@ def optimize_arp_anchors(raw_obs, diamond_observations=None, initial_eyelet_gues
     # Configure the state vector and args depending on whether we are freezing anchors
     if fixed_anchor_poses is not None:
         x0 = initial_eyelet_guesses.flatten()
-        opt_args = (raw_obs, diamond_observations, initial_eyelet_guesses, False, fixed_anchor_poses, line_deltas, cam_tilts)
+        opt_args = (raw_obs, diamond_observations, initial_eyelet_guesses, False, fixed_anchor_poses, line_deltas, cam_tilts, line_geometry)
     else:
         initial_anchor_flat = anchor_poses_to_use.flatten()
         initial_eyelet_flat = initial_eyelet_guesses.flatten()
         x0 = np.concatenate([initial_anchor_flat, initial_eyelet_flat])
-        opt_args = (raw_obs, diamond_observations, initial_eyelet_guesses, False, None, line_deltas, cam_tilts)
+        opt_args = (raw_obs, diamond_observations, initial_eyelet_guesses, False, None, line_deltas, cam_tilts, line_geometry)
 
     logger.info('Running least squares optimization...')
     result = optimize.least_squares(
@@ -417,7 +455,7 @@ def optimize_arp_anchors(raw_obs, diamond_observations=None, initial_eyelet_gues
 
     # Run one final time with debug=True to print the cost distribution
     logger.info("Final Optimization Costs:")
-    multi_card_residuals(result.x, raw_obs, diamond_observations, initial_eyelet_guesses, debug=True, fixed_anchor_poses=fixed_anchor_poses, line_deltas=line_deltas, cam_tilts=cam_tilts)
+    multi_card_residuals(result.x, raw_obs, diamond_observations, initial_eyelet_guesses, debug=True, fixed_anchor_poses=fixed_anchor_poses, line_deltas=line_deltas, cam_tilts=cam_tilts, line_geometry=line_geometry)
 
     # Reshape back to distinct structures based on the freeze flag
     if fixed_anchor_poses is not None:

@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Calibration room plan output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["calibrationSafety", "roomPlan"],
+  "properties": {
+    "calibrationSafety": {
+      "type": "object",
+      "required": [
+        "mode",
+        "safeProbeCenter",
+        "calibrationZone",
+        "noGoZones",
+        "lineEndpoints",
+        "obstacleMarginM",
+        "hazardAvoidRadiusM",
+        "minProbeHalfWidthM",
+        "minProbeHalfHeightM",
+        "maxProbeHalfWidthM",
+        "maxProbeHalfHeightM",
+        "validationDistanceM",
+        "validationSpeedMps",
+        "manualAssistTimeoutS",
+        "allowDegradedReference",
+        "skipSafeMotionValidation"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["full", "constrained", "manual_assisted"]
+        },
+        "safeProbeCenter": {
+          "$ref": "#/$defs/pointArray"
+        },
+        "calibrationZone": {
+          "type": "object"
+        },
+        "noGoZones": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "lineEndpoints": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "obstacleMarginM": {
+          "type": "number",
+          "minimum": 0
+        },
+        "hazardAvoidRadiusM": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minProbeHalfWidthM": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minProbeHalfHeightM": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maxProbeHalfWidthM": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maxProbeHalfHeightM": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "validationDistanceM": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "validationSpeedMps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "manualAssistTimeoutS": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "allowDegradedReference": {
+          "type": "boolean"
+        },
+        "skipSafeMotionValidation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "roomPlan": {
+      "type": "object",
+      "required": [
+        "room",
+        "selectedCenter",
+        "selectedProbe",
+        "candidateCounts",
+        "obstacleCount",
+        "hazardAvoidanceCount",
+        "lineEndpointCount",
+        "clearanceScore",
+        "probeAreaScore",
+        "recommendedActions",
+        "planQuality"
+      ],
+      "properties": {
+        "room": {
+          "type": "object"
+        },
+        "selectedCenter": {
+          "$ref": "#/$defs/point"
+        },
+        "selectedProbe": {
+          "type": "object",
+          "required": ["maxHalfWidthM", "maxHalfHeightM"],
+          "properties": {
+            "maxHalfWidthM": {
+              "type": "number"
+            },
+            "maxHalfHeightM": {
+              "type": "number"
+            }
+          }
+        },
+        "candidateCounts": {
+          "type": "object",
+          "required": ["searched", "accepted", "rejected", "reasons"],
+          "properties": {
+            "searched": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "accepted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rejected": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasons": {
+              "type": "object",
+              "properties": {
+                "inside_no_go": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cable_sweep_intersects_no_go": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "probe_envelope_too_small": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "obstacleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hazardAvoidanceCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lineEndpointCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "clearanceScore": {
+          "type": "number"
+        },
+        "probeAreaScore": {
+          "type": "number"
+        },
+        "recommendedActions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hazardArtifactSources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "planQuality": {
+          "type": "object",
+          "required": ["level", "acceptedCandidateRatio", "reasons"],
+          "properties": {
+            "level": {
+              "type": "string",
+              "enum": ["marginal", "usable", "strong"]
+            },
+            "acceptedCandidateRatio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "reasons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "pointArray": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "number"
+      }
+    }
+  }
+}

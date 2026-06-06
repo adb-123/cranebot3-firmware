@@ -1,0 +1,84 @@
+{
+  "room": {
+    "widthM": 3.6,
+    "depthM": 2.4,
+    "origin": {
+      "x": 0.0,
+      "y": 0.0
+    },
+    "calibrationZoneInsetM": 0.15
+  },
+  "mode": "manual_assisted",
+  "gridStepM": 0.05,
+  "obstacleMarginM": 0.08,
+  "hazardAvoidRadiusM": 0.2,
+  "recentHazards": [
+    {
+      "name": "previous_catch",
+      "x": 3.3,
+      "y": 2.05,
+      "radiusM": 0.1,
+      "marginM": 0.02
+    }
+  ],
+  "lineEndpoints": [
+    {
+      "name": "front_left",
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "name": "rear_left",
+      "x": 0.0,
+      "y": 2.4
+    }
+  ],
+  "noGoZones": [
+    {
+      "name": "tripod",
+      "type": "circle",
+      "center": [
+        1.4,
+        1.0
+      ],
+      "radiusM": 0.2,
+      "marginM": 0.05
+    },
+    {
+      "name": "table",
+      "type": "rect",
+      "min": {
+        "x": 2.4,
+        "y": 0.4
+      },
+      "max": {
+        "x": 3.1,
+        "y": 1.2
+      },
+      "marginM": 0.05
+    },
+    {
+      "name": "plant_cluster",
+      "type": "polygon",
+      "points": [
+        [
+          0.45,
+          1.45
+        ],
+        [
+          0.85,
+          1.35
+        ],
+        [
+          0.95,
+          1.75
+        ],
+        [
+          0.55,
+          1.85
+        ]
+      ],
+      "marginM": 0.05
+    }
+  ]
+}

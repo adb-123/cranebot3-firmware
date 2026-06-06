@@ -173,10 +173,13 @@ class TestDamiaoSpoolController(unittest.TestCase):
         self.mock_motor.ensure_control_mode.assert_called_with("VEL")
         self.mock_motor.disable.assert_called_once()
         
-        # Verify that record tracking gathered 1 record tuple
+        # Verify that record tracking gathered 1 record tuple.
         self.assertEqual(len(self.controller.record), 1)
-        # Record format: (start_time, last_length, line_speed, tension)
+        # First four fields stay backward-compatible: time, length, line_speed, tension.
         self.assertEqual(self.controller.record[0][1], 3.0)
+        self.assertEqual(len(self.controller.record[0]), 5)
+        self.assertTrue(self.controller.record[0][4]["motor_controller_available"])
+        self.assertEqual(self.controller.record[0][4]["motor_velocity_rad_s"], 2.0)
 
     @patch('time.sleep')
     @patch('time.time')

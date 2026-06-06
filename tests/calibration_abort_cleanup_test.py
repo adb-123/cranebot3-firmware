@@ -45,6 +45,10 @@ def _cleanup_observer():
     observer.anchors = {0: _FakeAnchor(0), 1: _FakeAnchor(1)}
     observer.bot_clients = {}
     observer.gripper_client = SimpleNamespace(calibrating_room_spin=False)
+    observer.pe = SimpleNamespace(
+        gant_pos=np.array([0.0, 0.0, 1.0]),
+        point_inside_work_area_2d=lambda _point: True,
+    )
     observer.motion_task = None
     observer.swing_cancellation_task = None
     observer.active_set = {'default'}

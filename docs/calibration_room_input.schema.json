@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Calibration room planner input",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "room": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "widthM": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "depthM": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "origin": {
+          "$ref": "#/$defs/pointObject"
+        },
+        "calibrationZoneInsetM": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "roomWidthM": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "roomDepthM": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["full", "constrained", "manual_assisted"]
+    },
+    "gridStepM": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "obstacleMarginM": {
+      "type": "number",
+      "minimum": 0
+    },
+    "hazardAvoidRadiusM": {
+      "type": "number",
+      "minimum": 0
+    },
+    "lineEndpoints": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/pointArray"
+          },
+          {
+            "$ref": "#/$defs/namedPoint"
+          }
+        ]
+      }
+    },
+    "noGoZones": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/circleNoGo"
+          },
+          {
+            "$ref": "#/$defs/rectNoGo"
+          },
+          {
+            "$ref": "#/$defs/polygonNoGo"
+          }
+        ]
+      }
+    },
+    "recentHazards": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hazard"
+      }
+    }
+  },
+  "$defs": {
+    "pointArray": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "number"
+      }
+    },
+    "pointObject": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "namedPoint": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "circleNoGo": {
+      "type": "object",
+      "required": ["name", "center", "radiusM"],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "circle"
+        },
+        "center": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/pointArray"
+            },
+            {
+              "$ref": "#/$defs/pointObject"
+            }
+          ]
+        },
+        "radiusM": {
+          "type": "number",
+          "minimum": 0
+        },
+        "marginM": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "rectNoGo": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "rect"
+        },
+        "rect": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/pointArray"
+              },
+              {
+                "$ref": "#/$defs/pointObject"
+              }
+            ]
+          }
+        },
+        "min": {
+          "$ref": "#/$defs/pointObject"
+        },
+        "max": {
+          "$ref": "#/$defs/pointObject"
+        },
+        "marginM": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["rect"]
+        },
+        {
+          "required": ["min", "max"]
+        }
+      ]
+    },
+    "polygonNoGo": {
+      "type": "object",
+      "required": ["name", "points"],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "polygon"
+        },
+        "points": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/pointArray"
+              },
+              {
+                "$ref": "#/$defs/pointObject"
+              }
+            ]
+          }
+        },
+        "marginM": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "hazard": {
+      "type": "object",
+      "required": ["name", "x", "y"],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "radiusM": {
+          "type": "number",
+          "minimum": 0
+        },
+        "marginM": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

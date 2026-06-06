@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neufangled.com/schemas/stringman/calibration-artifact-summary.schema.json",
+  "title": "Stringman calibration artifact summary",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "session_id": {
+      "type": ["string", "null"]
+    },
+    "artifact_path": {
+      "type": ["string", "null"]
+    },
+    "status": {
+      "type": ["string", "null"]
+    },
+    "phase": {
+      "type": ["string", "null"]
+    },
+    "created_at": {
+      "type": ["string", "null"]
+    },
+    "updated_at": {
+      "type": ["string", "null"]
+    },
+    "summary": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "phase": {
+          "type": ["string", "null"]
+        },
+        "status": {
+          "type": ["string", "null"]
+        },
+        "failure_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warning_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "line_health_sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "optimizer_report_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hazard_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fatal_hazard_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recoverable_hazard_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "high_tension_lines": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "stale_or_invalid_line_health": {
+          "type": "boolean"
+        },
+        "failed_optimizers": {
+          "type": "array",
+          "items": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "latest_failure": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "latest_warning": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "failed_optimizers": {
+      "type": "array",
+      "items": {
+        "type": ["string", "null"]
+      }
+    },
+    "latest_line_health": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": ["string", "null"]
+        },
+        "high_tension_lines": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "degraded_reference": {
+          "type": "boolean"
+        },
+        "gantry_visual_reference": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "fresh_anchors": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "stale_or_missing_anchors": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "fresh_anchor_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "safety_constraints": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "adaptive_diamond_selected": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "half_height_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "half_width_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "safe": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "adaptive_diamond_rejections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "half_height_m": {
+            "type": "number",
+            "minimum": 0
+          },
+          "half_width_m": {
+            "type": "number",
+            "minimum": 0
+          },
+          "safe": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "safe_validation_candidates": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "string"
+      }
+    },
+    "safe_validation_rejected": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "safe_validation_result": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "hazards": {
+      "type": "array",
+      "items": {
+        "type": ["object", "null"],
+        "additionalProperties": true,
+        "properties": {
+          "kind": {
+            "type": ["string", "null"]
+          },
+          "fatal": {
+            "type": "boolean"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "message": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "recommended_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -15,6 +15,9 @@ MIN_SWING_GAIN = 0.0
 MAX_SWING_GAIN = 0.02
 MIN_SWING_MAX_VELOCITY = 0.0
 MAX_SWING_MAX_VELOCITY = 0.03
+CALIBRATION_SAFETY_KEYS = ('calibrationSafety', 'calibration_safety', 'roomSafety', 'room_safety')
+EXTERNAL_ROOM_CAMERA_KEYS = ('externalRoomCameras', 'external_room_cameras')
+PRESERVED_RAW_CONFIG_KEYS = CALIBRATION_SAFETY_KEYS + EXTERNAL_ROOM_CAMERA_KEYS
 
 # Anchors
 # Defaults based on a square room setup, pointing towards center.
@@ -168,14 +171,42 @@ def normalize_config_defaults(config: nf_config.StringmanPilotConfig, raw_config
     if config.swing_auto_abort_ratio <= 1.0:
         config.swing_auto_abort_ratio = DEFAULT_SWING_AUTO_ABORT_RATIO
 
+def _preserved_raw_config_blocks(path: Path) -> dict:
+    if path is None or not Path(path).exists():
+        return {}
+    try:
+        raw = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: raw[key]
+        for key in PRESERVED_RAW_CONFIG_KEYS
+        if key in raw
+    }
+
+
+def _strip_raw_config_blocks(raw_config: dict) -> dict:
+    return {
+        key: value
+        for key, value in raw_config.items()
+        if key not in PRESERVED_RAW_CONFIG_KEYS
+    }
+
+
 def save_config(config: nf_config.StringmanPilotConfig, path: Path=DEFAULT_CONFIG_PATH):
     """
     Writes the proto to a JSON file.
     """
     if path is None:
         return
+    preserved = _preserved_raw_config_blocks(path)
+    payload = json.loads(config.to_json(indent=2))
+    if isinstance(payload, dict):
+        payload.update(preserved)
     with open(path, 'w') as f:
-        f.write(config.to_json(indent=2))
+        f.write(json.dumps(payload, indent=2))
 
 def load_config(path: Path=DEFAULT_CONFIG_PATH) -> nf_config.StringmanPilotConfig:
     """
@@ -188,7 +219,8 @@ def load_config(path: Path=DEFAULT_CONFIG_PATH) -> nf_config.StringmanPilotConfi
             print(f'Loaded config from {path}')
             raw_text = f.read()
             raw_config = json.loads(raw_text)
-            c = nf_config.StringmanPilotConfig().from_json(raw_text)
+            proto_config = _strip_raw_config_blocks(raw_config) if isinstance(raw_config, dict) else raw_config
+            c = nf_config.StringmanPilotConfig().from_json(json.dumps(proto_config))
             if c.camera_cal is None or c.camera_cal_wide is None:
                 default = create_default_config()
                 if c.camera_cal is None:

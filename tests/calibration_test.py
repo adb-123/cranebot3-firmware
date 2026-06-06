@@ -250,6 +250,37 @@ class TestEyeletCalibration(unittest.TestCase):
         np.testing.assert_array_almost_equal(residuals_one[3:7], expected_plane)
         np.testing.assert_array_almost_equal(residuals_three[3:7], expected_plane)
 
+    @patch('nf_robot.host.eyelet_calibration.compose_poses')
+    @patch('nf_robot.host.eyelet_calibration.model_constants')
+    def test_eyelet_line_geometry_adds_only_usable_line_residuals(self, mock_constants, mock_compose):
+        fixed_anchor_poses = np.zeros((2, 2, 3))
+        eyelets = np.array([[0.0, 0.0, 4.0], [0.0, 1.0, 6.0]])
+        x = eyelets.flatten()
+        mock_constants.arp_anchor_right_eyelet = (np.zeros(3), np.array([1.0, 0.0, 0.0]))
+        mock_compose.side_effect = lambda poses: poses[-1]
+
+        baseline = eyelet_calibration.multi_card_residuals(
+            x,
+            {},
+            diamond_observations=None,
+            fixed_anchor_poses=fixed_anchor_poses,
+        )
+        with_line_geometry = eyelet_calibration.multi_card_residuals(
+            x,
+            {},
+            diamond_observations=None,
+            fixed_anchor_poses=fixed_anchor_poses,
+            line_geometry={
+                "gantry_pos": [0.0, 0.0, 0.0],
+                "line_lengths": [0.5, 4.0, 1.0, 1.0],
+                "usable_lines": [True, True, False, False],
+            },
+        )
+
+        self.assertEqual(len(with_line_geometry), len(baseline) + 2)
+        self.assertNotEqual(float(with_line_geometry[4]), 0.0)
+        self.assertEqual(float(with_line_geometry[5]), 0.0)
+
     @patch('nf_robot.host.eyelet_calibration.optimize.least_squares')
     def test_optimize_arp_anchors_uses_robust_solver(self, mock_least_squares):
         fixed_anchor_poses = np.zeros((2, 2, 3))
